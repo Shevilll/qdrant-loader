@@ -212,7 +212,7 @@ class StateChangeDetector:
         Classify a batch of documents into:
         - new
         - updated
-        - deleted (IDs only
+        - deleted (IDs only)
         """
         if not docs:
             return [], [], []
@@ -224,8 +224,8 @@ class StateChangeDetector:
 
         existing_map = await self.state_manager.get_by_uris(uris)
 
-        new_docs = []
-        updated_docs = []
+        new_docs: list[Document] = []
+        updated_docs: list[Document] = []
         for state, doc in zip(current_states, docs, strict=False):
             prev = existing_map.get(state.uri)
             if not prev:
@@ -236,5 +236,5 @@ class StateChangeDetector:
                     or state.updated_at > prev.updated_at
                 ):
                     updated_docs.append(doc)
-        deleted_ids = list[str] = []
+        deleted_ids: list[str] = []
         return new_docs, updated_docs, deleted_ids

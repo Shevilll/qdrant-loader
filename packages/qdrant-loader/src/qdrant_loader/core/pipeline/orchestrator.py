@@ -10,6 +10,7 @@ from qdrant_loader.connectors.base import ConnectorConfigurationError
 from qdrant_loader.connectors.factory import get_connector_instance
 from qdrant_loader.core.document import Document
 from qdrant_loader.core.project_manager import ProjectManager
+from qdrant_loader.core.state.checkpoint_manager import Checkpoint, CheckpointManager
 from qdrant_loader.core.state.state_change_detector import StateChangeDetector
 from qdrant_loader.core.state.state_manager import StateManager
 from qdrant_loader.utils.logging import LoggingConfig
@@ -60,6 +61,7 @@ class PipelineOrchestrator:
         source: str | None = None,
         project_id: str | None = None,
         force: bool = False,
+        checkpoint_manager: CheckpointManager | None = None,
     ) -> list[Document]:
         """Main entry point for document processing.
 
@@ -76,6 +78,10 @@ class PipelineOrchestrator:
         logger.info("🚀 Starting document ingestion")
         self.last_pipeline_result = None
 
+        if checkpoint_manager is None:
+            checkpoint_manager = CheckpointManager(
+                self.components.state_manager
+            )
         try:
             # Determine sources configuration to use
             if sources_config:
@@ -135,6 +141,7 @@ class PipelineOrchestrator:
                 filtered_config,
                 current_project_id,
                 force=force,
+                checkpoint_manager=checkpoint_manager,
             )
 
             logger.info("✅ Streaming ingestion completed")
@@ -159,7 +166,7 @@ class PipelineOrchestrator:
             raise ValueError("Project manager not available")
 
         all_documents = []
-        aggregated_result = PipelineResult()
+        project_results: list[PipelineResult] = []
         failed_projects: list[str] = []
         project_ids = self.project_manager.list_project_ids()
 
@@ -177,58 +184,36 @@ class PipelineOrchestrator:
                 project_result = self.last_pipeline_result
                 all_documents.extend(project_documents)
 
-                if project_result is not None:
-                    aggregated_result.success_count += project_result.success_count
-                    aggregated_result.error_count += project_result.error_count
-                    aggregated_result.successfully_processed_documents.update(
-                        project_result.successfully_processed_documents
-                    )
-                    aggregated_result.failed_document_ids.update(
-                        project_result.failed_document_ids
-                    )
-                    aggregated_result.errors.extend(project_result.errors)
-
-                logger.debug(
-                    f"Processed {len(project_documents)} documents from project: {project_id}"
-                )
             except ConnectorConfigurationError as e:
                 logger.error(
-                    f"Configuration error in project {project_id}: "
-                    f"{sanitize_exception_message(e)}. "
-                    "Skipping this project — check connector settings.",
+                    f"Configuration error in project {project_id}: {sanitize_exception_message(e)}",
                     error_type=type(e).__name__,
-                    sanitized_traceback=sanitize_exception_message(
-                        traceback.format_exc()
-                    ),
-                )
-                aggregated_result.errors.append(
-                    f"Configuration error in project {project_id}: "
-                    f"{sanitize_exception_message(e)}"
+                    sanitized_traceback=sanitize_exception_message(traceback.format_exc()),
                 )
                 failed_projects.append(project_id)
                 continue
+
             except Exception as e:
-                safe_error = sanitize_exception_message(e)
-                sanitized_traceback = sanitize_exception_message(traceback.format_exc())
-                aggregated_result.error_count += 1
-                aggregated_result.errors.append(
-                    "project_id="
-                    f"{project_id}; "
-                    "error_type="
-                    f"{type(e).__name__}; "
-                    "message="
-                    f"{safe_error}; "
-                    "traceback="
-                    f"{sanitized_traceback}"
-                )
                 logger.error(
-                    f"Failed to process project {project_id}: {safe_error}",
+                    f"Failed to process project {project_id}: {sanitize_exception_message(e)}",
                     error_type=type(e).__name__,
-                    sanitized_traceback=sanitized_traceback,
+                    sanitized_traceback=sanitize_exception_message(traceback.format_exc()),
                 )
                 failed_projects.append(project_id)
-                # Continue processing other projects
                 continue
+
+        aggregated_result = PipelineResult()
+
+        for r in project_results:
+            aggregated_result.success_count += r.success_count
+            aggregated_result.error_count += r.error_count
+            aggregated_result.successfully_processed_documents.update(
+                r.successfully_processed_documents
+            )
+            aggregated_result.failed_document_ids.update(
+                r.failed_document_ids
+            )
+            aggregated_result.errors.extend(r.errors)
 
         self.last_pipeline_result = aggregated_result
 
@@ -326,6 +311,7 @@ class PipelineOrchestrator:
         filtered_config: SourcesConfig,
         project_id: str | None = None,
         force: bool = False,
+        checkpoint_manager: CheckpointManager | None = None,
     ):
         batch_size = self.settings.global_config.embedding.batch_size or 100
         first_batch_size = 32
@@ -341,13 +327,14 @@ class PipelineOrchestrator:
             tasks = [
                 asyncio.create_task(
                     self._ingest_single_source(
-                        source,
-                        pipeline,
-                        change_detector,
-                        batch_size,
-                        first_batch_size,
-                        force,
-                        project_id,
+                        connector=source,
+                        pipeline=pipeline,
+                        change_detector=change_detector,
+                        checkpoint_manager=checkpoint_manager,
+                        batch_size=batch_size,
+                        first_batch_size=first_batch_size,
+                        force=force,
+                        project_id=project_id,
                     )
                 )
                 for source in sources
@@ -359,6 +346,7 @@ class PipelineOrchestrator:
         connector,
         pipeline,
         change_detector,
+        checkpoint_manager,
         batch_size,
         first_batch_size,
         force,
@@ -366,26 +354,107 @@ class PipelineOrchestrator:
     ):
         batch = []
         started = False
+        batch_index = 0
+        #
+        # load checkpoint
+        #
+        source_config = connector.config
+        checkpoint = await checkpoint_manager.get_checkpoint(
+            project_id=project_id or "default",
+            source_type=source_config.source_type,
+            source=source_config.source,
+        )
 
-        async for doc in connector.stream_documents():
+        logger.info(
+            "Loaded checkpoint",
+            checkpoint=checkpoint.model_dump() if checkpoint else None,
+        )
+
+        async for doc in connector.stream_documents(
+            since=None,
+            checkpoint=checkpoint,
+        ):
 
             batch.append(doc)
 
-            # 🚀 early flush để đạt <2s
-            if not started and len(batch) >= first_batch_size:
-                await self._handle_batch(batch, pipeline, change_detector, force, project_id)
+            target_batch_size = (
+                first_batch_size
+                if not started
+                else batch_size
+            )
+
+            if len(batch) >= target_batch_size:
+
+                result = await self._handle_batch(
+                    batch=batch,
+                    pipeline=pipeline,
+                    change_detector=change_detector,
+                    force=force,
+                    project_id=project_id,
+                )
+                # SAVE CHECKPOINT ONLY AFTER SUCCESS
+                if (
+                    result
+                    and result.success_count > 0
+                ):
+
+                    await checkpoint_manager.save_checkpoint(
+                        Checkpoint(
+                            project_id=project_id or "default",
+                            source_type=source_config.source_type,
+                            source=source_config.source,
+                            cursor_kind="start_at",
+                            cursor_value=connector.current_cursor,
+                            batch_index=batch_index,
+                        )
+                    )
+
+                    logger.info(
+                        "Saved checkpoint",
+                        cursor=connector.current_cursor,
+                        batch_index=batch_index,
+                    )
+                # clear AFTER checkpoint save
                 batch.clear()
+                batch_index += 1
                 started = True
-
-            elif len(batch) >= batch_size:
-                self.log_memory()
-                await self._handle_batch(batch, pipeline, change_detector, force, project_id)
-                batch.clear()
-
-        # flush cuối
+        # flush remaining docs
         if batch:
-            await self._handle_batch(batch, pipeline, change_detector, force, project_id)
-    
+            result = await self._handle_batch(
+                batch=batch,
+                pipeline=pipeline,
+                change_detector=change_detector,
+                force=force,
+                project_id=project_id,
+            )
+
+            if (
+                result
+                and result.success_count > 0
+            ):
+
+                await checkpoint_manager.save_checkpoint(
+                    Checkpoint(
+                        project_id=project_id or "default",
+                        source_type=source_config.source_type,
+                        source=source_config.source,
+                        cursor_kind="start_at",
+                        cursor_value=connector.current_cursor,
+                        batch_index=batch_index,
+                    )
+                )
+        # clean completion
+        await checkpoint_manager.clear_checkpoint(
+            project_id=project_id or "default",
+            source_type=source_config.source_type,
+            source=source_config.source,
+        )
+
+        logger.info(
+            "Completed source ingestion",
+            source=source_config.source,
+        )
+
     async def _handle_batch(
         self,
         batch,
@@ -406,23 +475,22 @@ class PipelineOrchestrator:
                     await pipeline.delete_batch(deleted_ids)
 
             if not to_process:
-                return
+                return None
 
             result = await pipeline.process_batch(to_process)
 
-            # 🔥 update state ngay sau mỗi batch
             await self._update_document_states(
                 to_process,
                 result.successfully_processed_documents,
                 project_id,
             )
+            return result
 
         except Exception as e:
             logger.exception("Batch processing failed", error=str(e))
-    
+            return None
     # function to test memory usage at any point in the pipeline
     def log_memory():
         process = psutil.Process(os.getpid())
         mem = process.memory_info().rss / 1024 / 1024
-        logger.info(f"🧠 Memory usage: {mem:.2f} MB")
-
+        logger.info(f"Memory usage: {mem:.2f} MB")

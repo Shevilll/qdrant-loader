@@ -32,18 +32,17 @@ class JiraDataCenterConnector(BaseJiraConnector):
         return f"{self.base_url}/rest/api/2/{endpoint}"
 
     async def get_issues(
-        self, updated_after: datetime | None = None
+        self, updated_after: datetime | None = None, start_at: int = 0
     ) -> AsyncGenerator[JiraIssue, None]:
         """
         Get all issues from Jira.
 
         Args:
             updated_after: Optional datetime to filter issues updated after this time
-
+            start_at: Starting index for pagination
         Yields:
             JiraIssue objects
         """
-        start_at = 0
         page_size = self.config.page_size
         total_issues = 0
         processed_count = 0
@@ -53,6 +52,7 @@ class JiraDataCenterConnector(BaseJiraConnector):
             project_key=self.config.project_key,
             page_size=page_size,
             updated_after=updated_after.isoformat() if updated_after else None,
+            resume_start_at = start_at
         )
 
         while True:
@@ -102,7 +102,11 @@ class JiraDataCenterConnector(BaseJiraConnector):
             if total_issues == 0:
                 total_issues = response.get("total", 0)
                 logger.info(f"🎫 Found {total_issues} JIRA issues to process")
-
+            
+            # resume after this page fully succeeds
+            next_cursor = start_at + len(issues)
+            # Only expose cursor
+            self.current_cursor = str(next_cursor)
             # Log progress every 100 issues instead of every 50
             progress_log_interval = 100
 
@@ -111,8 +115,8 @@ class JiraDataCenterConnector(BaseJiraConnector):
                     parsed_issue = self._parse_issue(issue)
                     yield parsed_issue
                     processed_count += 1
-
-                    if (start_at + i + 1) % progress_log_interval == 0:
+                    current_position = start_at + i + 1
+                    if current_position % 100 == 0:
                         progress_percent = (
                             round((start_at + i + 1) / total_issues * 100, 1)
                             if total_issues > 0
@@ -133,8 +137,13 @@ class JiraDataCenterConnector(BaseJiraConnector):
                     # Continue processing other issues instead of failing completely
                     continue
 
-            # Check if we've processed all issues
-            start_at += len(issues)
+            # Save next cursor position
+            start_at = next_cursor
+
+            logger.debug(
+                "Prepared next Jira cursor",
+                next_start_at=self.current_cursor,
+            )
             if start_at >= total_issues:
                 logger.info(
                     f"✅ Completed JIRA issue retrieval: "

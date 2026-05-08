@@ -2,11 +2,12 @@
 SQLAlchemy models for state management database.
 """
 
-from datetime import UTC
+from datetime import UTC, datetime
 
 from sqlalchemy import (
     Boolean,
     Column,
+    DateTime,
     Float,
     ForeignKey,
     Index,
@@ -15,9 +16,10 @@ from sqlalchemy import (
     Text,
     TypeDecorator,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy import DateTime as SQLDateTime
-from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy.orm import Mapped, declarative_base, mapped_column, relationship
 
 from qdrant_loader.utils.logging import LoggingConfig
 
@@ -155,6 +157,7 @@ class DocumentStateRecord(Base):
         String, ForeignKey("projects.id", ondelete="CASCADE"), nullable=True
     )  # Nullable for backward compatibility
     document_id = Column(String, nullable=False)
+    uri = Column(String, nullable=True)
     source_type = Column(String, nullable=False)
     source = Column(String, nullable=False)
     url = Column(String, nullable=False)
@@ -206,9 +209,45 @@ class DocumentStateRecord(Base):
             name="uix_project_document",
         ),
         Index("ix_document_url", "url"),
+        Index("ix_document_uri", "uri"),
         Index("ix_document_converted", "is_converted"),
         Index("ix_document_attachment", "is_attachment"),
         Index("ix_document_parent", "parent_document_id"),
         Index("ix_document_conversion_method", "conversion_method"),
         Index("ix_document_project_id", "project_id"),
+    )
+
+class IngestionCheckpoint(Base):
+    __tablename__ = "ingestion_checkpoints"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "source_type",
+            "source",
+            name="uq_ingestion_checkpoint_source",
+        ),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[str] = mapped_column(String, nullable=False)
+    source_type: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    cursor_kind: Mapped[str] = mapped_column(String, nullable=False)
+    """
+    page_token
+    jql_window
+    git_commit
+    since_ts
+    """
+    cursor_value: Mapped[str] = mapped_column(String, nullable=False)
+    batch_index: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
     )

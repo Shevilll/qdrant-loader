@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator
 from datetime import datetime
 from urllib.parse import urlparse  # noqa: F401 - may be used in URL handling
 
+from qdrant_loader.core.state.checkpoint_manager import Checkpoint
 import requests
 from requests.auth import HTTPBasicAuth  # noqa: F401 - compatibility
 
@@ -68,6 +69,7 @@ class BaseJiraConnector(BaseConnector):
         super().__init__(config)
         self.config = config
         self.base_url = str(config.base_url).rstrip("/")
+        self.current_cursor: str | None = None
 
         # Initialize session
         self.session = requests.Session()
@@ -398,7 +400,7 @@ class BaseJiraConnector(BaseConnector):
 
     @abstractmethod
     async def get_issues(
-        self, updated_after: datetime | None = None
+        self, updated_after: datetime | None = None, start_at: int = 0
     ) -> AsyncGenerator[JiraIssue, None]:
         """Get all issues from Jira."""
         ...
@@ -459,9 +461,19 @@ class BaseJiraConnector(BaseConnector):
 
         return documents
 
-    async def stream_documents(self, since: datetime | None) -> AsyncGenerator[Document, None]:
+    async def stream_documents(self, since: datetime | None, checkpoint: Checkpoint | None = None,) -> AsyncGenerator[Document, None]:
         """Stream documents from Jira without accumulating them all in memory."""
-        async for issue in self.get_issues(updated_after=since):
+        start_at = 0
+        if checkpoint and checkpoint.cursor_value:
+            try:
+                start_at = int(checkpoint.cursor_value)
+            except ValueError:
+                logger.warning(
+                    "Invalid checkpoint cursor value, starting from the beginning",
+                    cursor_value=checkpoint.cursor_value,
+                )
+            
+        async for issue in self.get_issues(updated_after=since, start_at=start_at):
             document = self._issue_to_document(issue)
             yield document 
             # attachments
@@ -474,7 +486,7 @@ class BaseJiraConnector(BaseConnector):
                         issue_key=issue.key,
                         count=len(attachment_metadata),
                     )
-                    attachment_documents = self.attachment_reader.fetch_and_process(
+                    attachment_documents = await self.attachment_reader.fetch_and_process(
                         attachment_metadata,
                         document,
                     )

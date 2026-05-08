@@ -5,21 +5,11 @@ import time
 
 from qdrant_loader.core.document import Document
 from qdrant_loader.utils.logging import LoggingConfig
-from dataclasses import dataclass
 
 from .workers import ChunkingWorker, EmbeddingWorker, UpsertWorker
 from .workers.upsert_worker import PipelineResult
 
 logger = LoggingConfig.get_logger(__name__)
-
-@dataclass
-class BatchResult:
-    """Result of processing a batch of documents."""
-
-    success_count: int = 0
-    failure_count: int = 0
-    skipped_count: int = 0
-
 class DocumentPipeline:
     """Handles the chunking -> embedding -> upsert pipeline."""
 
@@ -71,7 +61,12 @@ class DocumentPipeline:
             except TimeoutError:
                 logger.error("❌ Pipeline timed out after 1 hour")
                 result = PipelineResult()
+                result.success_count = 0
                 result.error_count = len(documents)
+
+                result.successfully_processed_documents = set()
+                result.failed_document_ids = set()
+
                 result.errors = ["Pipeline timed out after 1 hour"]
                 return result
 
@@ -97,30 +92,37 @@ class DocumentPipeline:
             )
             # Return a result with error information
             result = PipelineResult()
+            result.success_count = 0
             result.error_count = len(documents)
-            result.errors = [f"Pipeline failed: {e}"]
+            result.successfully_processed_documents = set()
+            result.failed_document_ids = set(doc.id for doc in documents)
+            result.errors = [f"Pipeline failed with exception: {e}"]
             return result
     
-    async def process_batch(self, docs: list[Document]) -> BatchResult:
+    async def process_batch(self, docs: list[Document]) -> PipelineResult:
         """
         Process a bounded batch of documents.
         Return existing pipeline safety.
         """
 
         if not docs:
-            return BatchResult()
+            return PipelineResult()           
         try:
             result = await self.process_documents(docs)
 
-            return BatchResult(
-                success_count=result.success_count,
-                failure_count=result.error_count,
-                skipped_count=0,  # Skipping logic can be added if needed
-            )
+            result_return = PipelineResult()
+            result_return.success_count = result.success_count
+            result_return.error_count = result.error_count
+            result_return.successfully_processed_documents = result.successfully_processed_documents
+            result_return.failed_document_ids = result.failed_document_ids
+            result_return.errors = result.errors
+            return result_return
         except Exception as e:
             logger.error(f"❌ Batch processing failed: {e}", exc_info=True)
-            return BatchResult(
-                success_count=0,
-                failure_count=len(docs),
-                skipped_count=0,
-            )
+            result = PipelineResult()
+            result.success_count = 0
+            result.error_count = len(docs)
+            result.successfully_processed_documents = set()
+            result.failed_document_ids = set(doc.id for doc in docs)
+            result.errors = [f"Pipeline failed: {e}"]
+            return result

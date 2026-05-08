@@ -1,10 +1,11 @@
 from abc import ABC, abstractmethod
-import datetime
+from datetime import datetime
 from typing import AsyncIterator
 
 from qdrant_loader.config.source_config import SourceConfig
 from qdrant_loader.core.document import Document
 from qdrant_loader.core.file_conversion import FileConversionConfig
+from qdrant_loader.core.state.checkpoint_manager import Checkpoint
 
 
 class ConnectorConfigurationError(Exception):
@@ -50,7 +51,7 @@ class BaseConnector(ABC):
         """Get documents from the source."""
     
     @abstractmethod
-    async def stream_documents(self, since: datetime | None) -> AsyncIterator[Document]: # type: ignore
+    async def stream_documents(self, since: datetime | None, checkpoint: Checkpoint | None = None,) -> AsyncIterator[Document]: # type: ignore
         """Stream documents from the source."""
     
     async def fetch_by_id(self, entity_id: str) -> Document | None:

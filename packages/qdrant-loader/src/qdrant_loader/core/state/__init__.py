@@ -12,12 +12,13 @@ from .exceptions import (
     MissingMetadataError,
     StateError,
 )
-from .models import DocumentStateRecord, IngestionHistory
+from .models import DocumentStateRecord, IngestionHistory, IngestionCheckpoint
 from .state_manager import StateManager
 
 __all__ = [
     "DatabaseError",
     "DocumentStateRecord",
+    "IngestionCheckpoint",
     "IngestionHistory",
     "InvalidDocumentStateError",
     "MigrationError",
