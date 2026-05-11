@@ -69,6 +69,9 @@ class Project(Base):
     document_states = relationship(
         "DocumentStateRecord", back_populates="project", cascade="all, delete-orphan"
     )
+    ingestion_checkpoints = relationship(
+        "IngestionCheckpoint", back_populates="project", cascade="all, delete-orphan"
+    )
 
     __table_args__ = (
         UniqueConstraint("collection_name", name="uix_project_collection"),
@@ -211,4 +214,32 @@ class DocumentStateRecord(Base):
         Index("ix_document_parent", "parent_document_id"),
         Index("ix_document_conversion_method", "conversion_method"),
         Index("ix_document_project_id", "project_id"),
+    )
+
+
+class IngestionCheckpoint(Base):
+    """Tracks ingestion checkpoints for resumable data fetching."""
+
+    __tablename__ = "ingestion_checkpoints"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(
+        String, ForeignKey("projects.id", ondelete="CASCADE"), nullable=True
+    )  # Nullable for backward compatibility
+    source_type = Column(String, nullable=False)  # git, confluence, jira, etc.
+    source_name = Column(String, nullable=False)  # Source identifier
+    checkpoint_data = Column(Text, nullable=False)  # JSON string with checkpoint info
+    last_updated = Column(UTCDateTime(timezone=True), nullable=False)
+    created_at = Column(UTCDateTime(timezone=True), nullable=False)
+
+    # Relationships
+    project = relationship("Project", back_populates="ingestion_checkpoints")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id", "source_type", "source_name", name="uix_checkpoint_source"
+        ),
+        Index("ix_checkpoint_project_id", "project_id"),
+        Index("ix_checkpoint_source_type", "source_type"),
+        Index("ix_checkpoint_updated", "last_updated"),
     )

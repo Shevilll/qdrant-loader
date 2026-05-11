@@ -7,6 +7,7 @@ from qdrant_loader.config.source_config import SourceConfig
 from qdrant_loader.connectors.base import BaseConnector, ConnectorConfigurationError
 from qdrant_loader.core.document import Document
 from qdrant_loader.core.file_conversion import FileConversionConfig
+from qdrant_loader.core.state import CheckpointManager
 from qdrant_loader.utils.logging import LoggingConfig
 from qdrant_loader.utils.sensitive import sanitize_exception_message
 
@@ -20,9 +21,11 @@ class SourceProcessor:
         self,
         shutdown_event: asyncio.Event | None = None,
         file_conversion_config: FileConversionConfig | None = None,
+        checkpoint_manager: CheckpointManager | None = None,
     ):
         self.shutdown_event = shutdown_event or asyncio.Event()
         self.file_conversion_config = file_conversion_config
+        self.checkpoint_manager = checkpoint_manager
 
     async def process_source_type(
         self,
@@ -68,6 +71,16 @@ class SourceProcessor:
                         f"Setting file conversion config for {source_type} source: {source_name}"
                     )
                     connector.set_file_conversion_config(self.file_conversion_config)
+
+                # Set checkpoint manager if available and connector supports it
+                if (
+                    self.checkpoint_manager
+                    and hasattr(connector, "set_checkpoint_manager")
+                ):
+                    logger.debug(
+                        f"Setting checkpoint manager for {source_type} source: {source_name}"
+                    )
+                    connector.set_checkpoint_manager(self.checkpoint_manager)
 
                 # Use the connector as an async context manager to ensure proper initialization
                 async with connector:

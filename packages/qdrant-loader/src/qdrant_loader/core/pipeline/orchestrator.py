@@ -284,6 +284,10 @@ class PipelineOrchestrator:
         """Collect documents from all configured sources."""
         documents = []
 
+        # Inject project_id into source configs for checkpoint support
+        if project_id:
+            filtered_config = self._inject_project_id_into_configs(filtered_config, project_id)
+
         # Process each source type with project context
         if filtered_config.confluence:
             confluence_docs = (
@@ -465,3 +469,23 @@ class PipelineOrchestrator:
                     f"Failed to update document state for {doc.id}: {sanitize_exception_message(e)}",
                     error_type=type(e).__name__,
                 )
+
+    def _inject_project_id_into_configs(
+        self, sources_config: SourcesConfig, project_id: str
+    ) -> SourcesConfig:
+        """Inject project_id into all source configs for checkpoint support."""
+        # Create a copy of the config to avoid modifying the original
+        updated_config = sources_config.model_copy(deep=True)
+
+        # Inject project_id into all source configs
+        for source_type in ["confluence", "git", "jira", "publicdocs", "localfile"]:
+            source_configs = getattr(updated_config, source_type, None)
+            if source_configs:
+                for source_name, source_config in source_configs.items():
+                    # Since SourceConfig uses extra="allow", we can add project_id
+                    source_config.__dict__["project_id"] = project_id
+                    logger.debug(
+                        f"Injected project_id '{project_id}' into {source_type} source '{source_name}'"
+                    )
+
+        return updated_config

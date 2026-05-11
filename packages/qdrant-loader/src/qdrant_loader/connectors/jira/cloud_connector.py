@@ -39,25 +39,54 @@ class JiraCloudConnector(BaseJiraConnector):
         """
         Get all issues from Jira.
 
+        Supports resumable ingestion via checkpoints when checkpoint manager is set.
+
         Args:
             updated_after: Optional datetime to filter issues updated after this time
 
         Yields:
             JiraIssue objects
         """
-        next_page_token: str | None = None
-        processed_count = 0
+        # Load checkpoint if available
+        checkpoint_loaded = False
+        if self._checkpoint_manager:
+            self._checkpoint_data = await self._checkpoint_manager.load_checkpoint(
+                project_id=getattr(self.config, 'project_id', None),
+                source_type="jira",
+                source_name=self.config.source,
+            )
+            if self._checkpoint_data:
+                next_page_token = self._checkpoint_data.pagination_token
+                processed_count = self._checkpoint_data.processed_count or 0
+                checkpoint_loaded = True
+                logger.info(
+                    f"🎫 Resuming JIRA issue retrieval from checkpoint",
+                    project_key=self.config.project_key,
+                    processed_count=processed_count,
+                    pagination_token=next_page_token,
+                )
+            else:
+                logger.debug(
+                    f"🎫 No checkpoint found, starting fresh JIRA issue retrieval",
+                    project_key=self.config.project_key,
+                )
+
+        if not checkpoint_loaded:
+            next_page_token = None
+            processed_count = 0
+
         page_size = self.config.page_size
-        attempted_count = 0
+        attempted_count = processed_count  # Start from processed count
         # Log progress every 100 issues instead of every 50
         progress_log_interval = 100
 
-        logger.info(
-            "🎫 Starting JIRA issue retrieval",
-            project_key=self.config.project_key,
-            page_size=page_size,
-            updated_after=updated_after.isoformat() if updated_after else None,
-        )
+        if not checkpoint_loaded:
+            logger.info(
+                "🎫 Starting JIRA issue retrieval",
+                project_key=self.config.project_key,
+                page_size=page_size,
+                updated_after=updated_after.isoformat() if updated_after else None,
+            )
 
         while True:
             jql = self._build_jql_filter(updated_after)
@@ -109,6 +138,26 @@ class JiraCloudConnector(BaseJiraConnector):
                     yield parsed_issue
                     processed_count += 1
 
+                    # Save checkpoint periodically
+                    if (self._checkpoint_manager and
+                        processed_count % self._checkpoint_save_interval == 0):
+                        checkpoint_data = CheckpointData(
+                            pagination_token=next_page_token,
+                            processed_count=processed_count,
+                            last_processed_id=parsed_issue.id,
+                        )
+                        await self._checkpoint_manager.save_checkpoint(
+                            project_id=getattr(self.config, 'project_id', None),
+                            source_type="jira",
+                            source_name=self.config.source,
+                            checkpoint_data=checkpoint_data,
+                        )
+                        logger.debug(
+                            f"💾 Saved checkpoint at {processed_count} issues",
+                            project_key=self.config.project_key,
+                            pagination_token=next_page_token,
+                        )
+
                     if (processed_count) % progress_log_interval == 0:
                         logger.info(
                             f"🎫 Processed {processed_count} JIRA issues so far"
@@ -135,4 +184,15 @@ class JiraCloudConnector(BaseJiraConnector):
                     f"{attempted_count} issues attempted, "
                     f"{processed_count} successfully processed"
                 )
+                # Clear checkpoint on successful completion
+                if self._checkpoint_manager:
+                    await self._checkpoint_manager.delete_checkpoint(
+                        project_id=getattr(self.config, 'project_id', None),
+                        source_type="jira",
+                        source_name=self.config.source,
+                    )
+                    logger.debug(
+                        f"🗑️ Cleared checkpoint after successful completion",
+                        project_key=self.config.project_key,
+                    )
                 break

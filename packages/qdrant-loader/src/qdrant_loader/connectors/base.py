@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from qdrant_loader.config.source_config import SourceConfig
 from qdrant_loader.core.document import Document
 from qdrant_loader.core.file_conversion import FileConversionConfig
+from qdrant_loader.core.state import CheckpointManager
 
 
 class ConnectorConfigurationError(Exception):
@@ -19,6 +20,7 @@ class BaseConnector(ABC):
     def __init__(self, config: SourceConfig):
         self.config = config
         self._initialized = False
+        self._checkpoint_manager: CheckpointManager | None = None
 
     async def __aenter__(self):
         """Async context manager entry."""
@@ -28,6 +30,14 @@ class BaseConnector(ABC):
     async def __aexit__(self, exc_type, exc_val, _exc_tb):
         """Async context manager exit."""
         self._initialized = False
+
+    def set_checkpoint_manager(self, checkpoint_manager: CheckpointManager) -> None:
+        """Set the checkpoint manager for resumable ingestion.
+
+        Args:
+            checkpoint_manager: Checkpoint manager instance
+        """
+        self._checkpoint_manager = checkpoint_manager
 
     def set_file_conversion_config(
         self, file_conversion_config: FileConversionConfig

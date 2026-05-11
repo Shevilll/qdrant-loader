@@ -119,6 +119,7 @@ class PipelineComponentsFactory:
                 if settings.global_config
                 else None
             ),
+            checkpoint_manager=state_manager.checkpoint_manager if state_manager else None,
         )
 
         # Create source filter

@@ -910,3 +910,74 @@ class TestJiraValidateConnection:
         with patch.object(connector, "_make_request", side_effect=side_effect):
             with pytest.raises(ConnectorConfigurationError, match="403"):
                 await connector.__aenter__()
+
+
+class TestJiraCheckpoint:
+    """Test checkpoint functionality for Jira connector."""
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_save_and_load(self, jira_cloud_config):
+        """Test that checkpoints are saved and loaded correctly."""
+        from qdrant_loader.core.state import CheckpointData, CheckpointManager
+        from qdrant_loader.core.state.state_manager import StateManager
+        from qdrant_loader.config.state import StateManagementConfig
+
+        # Set up state manager with in-memory database
+        config = StateManagementConfig(database_path=":memory:")
+        state_manager = StateManager(config)
+        checkpoint_manager = None
+
+        async with state_manager:
+            checkpoint_manager = state_manager.checkpoint_manager
+
+            # Create test checkpoint data
+            checkpoint_data = CheckpointData(
+                pagination_token="test_token_123",
+                processed_count=50,
+                last_processed_id="ISSUE-123",
+            )
+
+            # Save checkpoint
+            await checkpoint_manager.save_checkpoint(
+                project_id="test_project",
+                source_type="jira",
+                source_name=jira_cloud_config.source,
+                checkpoint_data=checkpoint_data,
+            )
+
+            # Load checkpoint
+            loaded_checkpoint = await checkpoint_manager.load_checkpoint(
+                project_id="test_project",
+                source_type="jira",
+                source_name=jira_cloud_config.source,
+            )
+
+            # Verify checkpoint data
+            assert loaded_checkpoint is not None
+            assert loaded_checkpoint.pagination_token == "test_token_123"
+            assert loaded_checkpoint.processed_count == 50
+            assert loaded_checkpoint.last_processed_id == "ISSUE-123"
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_with_connector(self, jira_cloud_config):
+        """Test that connector uses checkpoint manager when available."""
+        from qdrant_loader.core.state.state_manager import StateManager
+        from qdrant_loader.config.state import StateManagementConfig
+
+        # Set up state manager
+        config = StateManagementConfig(database_path=":memory:")
+        state_manager = StateManager(config)
+
+        async with state_manager:
+            checkpoint_manager = state_manager.checkpoint_manager
+
+            # Create connector and set checkpoint manager
+            connector = JiraCloudConnector(jira_cloud_config)
+            connector.set_checkpoint_manager(checkpoint_manager)
+
+            # Verify checkpoint manager is set
+            assert connector._checkpoint_manager is not None
+
+            # Test that connector can be initialized
+            async with connector:
+                assert connector._initialized

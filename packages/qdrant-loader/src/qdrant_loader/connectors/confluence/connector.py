@@ -40,6 +40,7 @@ from qdrant_loader.core.file_conversion import (
     FileConverter,
     FileDetector,
 )
+from qdrant_loader.core.state import CheckpointData
 from qdrant_loader.utils.logging import LoggingConfig
 
 logger = LoggingConfig.get_logger(__name__)
@@ -68,6 +69,10 @@ class ConfluenceConnector(BaseConnector):
         # Set up authentication based on deployment type
         self._setup_authentication()
         self._initialized = False
+
+        # Checkpoint support
+        self._checkpoint_data: CheckpointData | None = None
+        self._checkpoint_save_interval = 50  # Save checkpoint every 50 documents
 
         # Initialize file conversion and attachment handling components
         self.file_converter = None
@@ -795,16 +800,41 @@ class ConfluenceConnector(BaseConnector):
     async def get_documents(self) -> list[Document]:
         """Fetch and process documents from Confluence.
 
+        Supports resumable ingestion via checkpoints when checkpoint manager is set.
+
         Returns:
             list[Document]: List of processed documents
         """
+        # Load checkpoint if available
+        checkpoint_loaded = False
+        if self._checkpoint_manager:
+            self._checkpoint_data = await self._checkpoint_manager.load_checkpoint(
+                project_id=getattr(self.config, 'project_id', None),
+                source_type="confluence",
+                source_name=self.config.source,
+            )
+            if self._checkpoint_data:
+                checkpoint_loaded = True
+                logger.info(
+                    f"🎫 Resuming Confluence ingestion from checkpoint",
+                    space_key=self.config.space_key,
+                    processed_count=self._checkpoint_data.processed_count or 0,
+                )
+
         documents = []
         page_count = 0
         total_documents = 0
+        processed_count = self._checkpoint_data.processed_count if self._checkpoint_data else 0
 
         if self.config.deployment_type == ConfluenceDeploymentType.CLOUD:
             # Cloud uses cursor-based pagination
-            cursor = None
+            cursor = self._checkpoint_data.pagination_token if self._checkpoint_data else None
+
+            if not checkpoint_loaded:
+                logger.info(
+                    "📄 Starting Confluence Cloud content retrieval",
+                    space_key=self.config.space_key,
+                )
 
             while True:
                 try:
@@ -833,6 +863,27 @@ class ConfluenceConnector(BaseConnector):
                                 )
                                 if document:
                                     documents.append(document)
+                                    processed_count += 1
+
+                                    # Save checkpoint periodically
+                                    if (self._checkpoint_manager and
+                                        processed_count % self._checkpoint_save_interval == 0):
+                                        checkpoint_data = CheckpointData(
+                                            pagination_token=cursor,
+                                            processed_count=processed_count,
+                                            last_processed_id=content['id'],
+                                        )
+                                        await self._checkpoint_manager.save_checkpoint(
+                                            project_id=getattr(self.config, 'project_id', None),
+                                            source_type="confluence",
+                                            source_name=self.config.source,
+                                            checkpoint_data=checkpoint_data,
+                                        )
+                                        logger.debug(
+                                            f"💾 Saved checkpoint at {processed_count} documents",
+                                            space_key=self.config.space_key,
+                                            cursor=cursor,
+                                        )
 
                                     attachment_docs = (
                                         await self._process_attachments_for_document(
@@ -881,8 +932,14 @@ class ConfluenceConnector(BaseConnector):
                     raise
         else:
             # Data Center/Server uses start/limit pagination
-            start = 0
+            start = self._checkpoint_data.custom_data.get('start', 0) if self._checkpoint_data else 0
             limit = 25
+
+            if not checkpoint_loaded:
+                logger.info(
+                    "📄 Starting Confluence Data Center content retrieval",
+                    space_key=self.config.space_key,
+                )
 
             while True:
                 try:
@@ -911,6 +968,27 @@ class ConfluenceConnector(BaseConnector):
                                 )
                                 if document:
                                     documents.append(document)
+                                    processed_count += 1
+
+                                    # Save checkpoint periodically
+                                    if (self._checkpoint_manager and
+                                        processed_count % self._checkpoint_save_interval == 0):
+                                        checkpoint_data = CheckpointData(
+                                            processed_count=processed_count,
+                                            last_processed_id=content['id'],
+                                            custom_data={'start': start + len(results)},  # Next start position
+                                        )
+                                        await self._checkpoint_manager.save_checkpoint(
+                                            project_id=getattr(self.config, 'project_id', None),
+                                            source_type="confluence",
+                                            source_name=self.config.source,
+                                            checkpoint_data=checkpoint_data,
+                                        )
+                                        logger.debug(
+                                            f"💾 Saved checkpoint at {processed_count} documents",
+                                            space_key=self.config.space_key,
+                                            start=start,
+                                        )
 
                                     attachment_docs = (
                                         await self._process_attachments_for_document(
@@ -946,6 +1024,18 @@ class ConfluenceConnector(BaseConnector):
                         f"Failed to fetch content from space {self.config.space_key}: {e!s}"
                     )
                     raise
+
+        # Clear checkpoint on successful completion
+        if self._checkpoint_manager:
+            await self._checkpoint_manager.delete_checkpoint(
+                project_id=getattr(self.config, 'project_id', None),
+                source_type="confluence",
+                source_name=self.config.source,
+            )
+            logger.debug(
+                f"🗑️ Cleared checkpoint after successful completion",
+                space_key=self.config.space_key,
+            )
 
         logger.info(
             f"📄 Confluence: {len(documents)} documents from space {self.config.space_key}"

@@ -11,6 +11,7 @@ from qdrant_loader.config.source_config import SourceConfig
 from qdrant_loader.config.state import IngestionStatus, StateManagementConfig
 from qdrant_loader.core.document import Document
 from qdrant_loader.core.state import transitions as _transitions
+from qdrant_loader.core.state.checkpoint_manager import CheckpointManager
 from qdrant_loader.core.state.models import DocumentStateRecord, IngestionHistory
 from qdrant_loader.core.state.session import create_tables as _create_tables
 from qdrant_loader.core.state.session import dispose_engine as _dispose_engine
@@ -36,6 +37,13 @@ class StateManager:
         self._engine: AsyncEngine | None = None
         self._session_factory: async_sessionmaker[AsyncSession] | None = None
         self.logger = LoggingConfig.get_logger(__name__)
+
+    @property
+    def checkpoint_manager(self) -> CheckpointManager:
+        """Get the checkpoint manager instance."""
+        if not self._initialized or self._session_factory is None:
+            raise RuntimeError("State manager must be initialized before accessing checkpoint manager")
+        return CheckpointManager(self._session_factory)
 
     @property
     def is_initialized(self) -> bool:

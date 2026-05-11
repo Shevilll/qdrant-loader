@@ -48,6 +48,7 @@ from qdrant_loader.core.file_conversion import (
     FileConverter,
     FileDetector,
 )
+from qdrant_loader.core.state import CheckpointData, CheckpointManager
 from qdrant_loader.utils.logging import LoggingConfig
 
 logger = LoggingConfig.get_logger(__name__)
@@ -78,6 +79,10 @@ class BaseJiraConnector(BaseConnector):
         self._last_sync: datetime | None = None
         self._rate_limiter = RateLimiter.per_minute(self.config.requests_per_minute)
         self._initialized = False
+
+        # Checkpoint support
+        self._checkpoint_data: CheckpointData | None = None
+        self._checkpoint_save_interval = 50  # Save checkpoint every 50 issues
 
         # Initialize file conversion components if enabled
         self.file_converter: FileConverter | None = None
@@ -400,7 +405,10 @@ class BaseJiraConnector(BaseConnector):
     async def get_issues(
         self, updated_after: datetime | None = None
     ) -> AsyncGenerator[JiraIssue, None]:
-        """Get all issues from Jira."""
+        """Get all issues from Jira.
+
+        Supports resumable ingestion via checkpoints when checkpoint manager is set.
+        """
         ...
 
     def _parse_issue(self, raw_issue: dict) -> JiraIssue:
