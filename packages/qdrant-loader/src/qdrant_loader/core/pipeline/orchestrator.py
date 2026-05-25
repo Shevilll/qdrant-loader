@@ -1,6 +1,7 @@
 """Main orchestrator for the ingestion pipeline."""
 
 import traceback
+from collections.abc import AsyncIterator
 
 from qdrant_loader.config import Settings, SourcesConfig
 from qdrant_loader.connectors.base import ConnectorConfigurationError
@@ -130,50 +131,64 @@ class PipelineOrchestrator:
             ):
                 raise ValueError(f"No sources found for type '{source_type}'")
 
-            # Collect documents from all sources
-            documents = await self._collect_documents_from_sources(
+            # Stream documents from all sources
+            document_stream = self._stream_documents_from_sources(
                 filtered_config, current_project_id
             )
 
-            # In force mode we bypass change detection entirely,
-            # so an empty snapshot means there is nothing to process.
-            #
-            # In normal mode we MUST continue into change detection,
-            # because an empty snapshot may indicate that previously
-            # indexed documents were deleted from the source.
-            if not documents and force:
-                logger.info("✅ No documents found from sources")
-                return []
+            # In force mode we bypass change detection entirely.
+            # Do not materialize all documents in memory.
+            async def _update_batch_states(
+                batch: list[Document], batch_result: PipelineResult
+            ) -> None:
+                if batch_result.successfully_processed_documents:
+                    await self._update_document_states(
+                        batch,
+                        batch_result.successfully_processed_documents,
+                        current_project_id,
+                    )
 
-            # Detect changes in documents (bypass if force=True)
             if force:
                 logger.warning(
-                    f"🔄 Force mode enabled: bypassing change detection, processing all {len(documents)} documents"
+                    "🔄 Force mode enabled: bypassing change detection, processing all documents"
                 )
-            else:
-                documents = await self._detect_document_changes(
-                    documents, filtered_config, current_project_id
-                )
+                processed_documents: list[Document] = []
 
-                if not documents:
-                    logger.info("✅ No new or updated documents to process")
+                async def _collect_processed_batch(
+                    batch: list[Document], batch_result: PipelineResult
+                ) -> None:
+                    await _update_batch_states(batch, batch_result)
+                    processed_documents.extend(batch)
+
+                result = await self.components.document_pipeline.process_documents(
+                    document_stream,
+                    on_batch_complete=_collect_processed_batch,
+                )
+                self.last_pipeline_result = result
+                if result.success_count == 0 and result.error_count == 0:
+                    logger.info("✅ No documents found from sources")
                     return []
+                return processed_documents
+
+            documents_to_process = await self._detect_document_changes(
+                document_stream, filtered_config, current_project_id
+            )
+            if not documents_to_process:
+                logger.info("✅ No new or updated documents to process")
+                return []
 
             # Process documents through the pipeline
             result = await self.components.document_pipeline.process_documents(
-                documents
+                documents_to_process,
+                on_batch_complete=_update_batch_states,
             )
             self.last_pipeline_result = result
-
-            # Update document states for successfully processed documents
-            await self._update_document_states(
-                documents, result.successfully_processed_documents, current_project_id
-            )
+            return documents_to_process
 
             logger.info(
                 f"✅ Ingestion completed: {result.success_count} chunks processed successfully"
             )
-            return documents
+            return documents_to_process
 
         except Exception as e:
             logger.error(
@@ -284,67 +299,64 @@ class PipelineOrchestrator:
             )
         return all_documents
 
-    async def _collect_documents_from_sources(
+    async def _stream_documents_from_sources(
         self, filtered_config: SourcesConfig, project_id: str | None = None
-    ) -> list[Document]:
-        """Collect documents from all configured sources."""
-        documents = []
+    ) -> AsyncIterator[Document]:
+        """Stream documents from all configured sources."""
+
+        async def _stream_for_source(
+            source_configs,
+            connector_type: str,
+        ):
+            async for document in self.components.source_processor.process_source_type_stream(
+                source_configs, get_connector_instance, connector_type
+            ):
+                if project_id and self.project_manager:
+                    document.metadata = self.project_manager.inject_project_metadata(
+                        project_id, document.metadata
+                    )
+                yield document
 
         # Process each source type with project context
         if filtered_config.confluence:
-            confluence_docs = (
-                await self.components.source_processor.process_source_type(
-                    filtered_config.confluence, get_connector_instance, "Confluence"
-                )
-            )
-            documents.extend(confluence_docs)
+            async for document in _stream_for_source(
+                filtered_config.confluence, "Confluence"
+            ):
+                yield document
 
         if filtered_config.git:
-            git_docs = await self.components.source_processor.process_source_type(
-                filtered_config.git, get_connector_instance, "Git"
-            )
-            documents.extend(git_docs)
+            async for document in _stream_for_source(
+                filtered_config.git, "Git"
+            ):
+                yield document
 
         if filtered_config.jira:
-            jira_docs = await self.components.source_processor.process_source_type(
-                filtered_config.jira, get_connector_instance, "Jira"
-            )
-            documents.extend(jira_docs)
+            async for document in _stream_for_source(
+                filtered_config.jira, "Jira"
+            ):
+                yield document
 
         if filtered_config.publicdocs:
-            publicdocs_docs = (
-                await self.components.source_processor.process_source_type(
-                    filtered_config.publicdocs, get_connector_instance, "PublicDocs"
-                )
-            )
-            documents.extend(publicdocs_docs)
+            async for document in _stream_for_source(
+                filtered_config.publicdocs, "PublicDocs"
+            ):
+                yield document
 
         if filtered_config.localfile:
-            localfile_docs = await self.components.source_processor.process_source_type(
-                filtered_config.localfile, get_connector_instance, "LocalFile"
-            )
-            documents.extend(localfile_docs)
-
-        # Inject project metadata into documents if project context is available
-        if project_id and self.project_manager:
-            for document in documents:
-                enhanced_metadata = self.project_manager.inject_project_metadata(
-                    project_id, document.metadata
-                )
-                document.metadata = enhanced_metadata
-
-        logger.info(f"📄 Collected {len(documents)} documents from all sources")
-        return documents
+            async for document in _stream_for_source(
+                filtered_config.localfile, "LocalFile"
+            ):
+                yield document
 
     async def _detect_document_changes(
         self,
-        documents: list[Document],
+        documents: AsyncIterator[Document],
         filtered_config: SourcesConfig,
         project_id: str | None = None,
     ) -> list[Document]:
         """Detect changes in documents and return only new/updated ones."""
 
-        logger.debug(f"Starting change detection for {len(documents)} documents")
+        logger.debug("Starting change detection for streamed documents")
 
         try:
             # Ensure state manager is initialized before use

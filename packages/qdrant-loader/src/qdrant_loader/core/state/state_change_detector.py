@@ -1,5 +1,6 @@
 """Base classes for connectors and change detectors."""
 
+from collections.abc import AsyncIterator
 from datetime import datetime
 from urllib.parse import quote, unquote
 
@@ -57,52 +58,78 @@ class StateChangeDetector:
             )
 
     async def detect_changes(
-        self, documents: list[Document], filtered_config: SourcesConfig
+        self,
+        documents: list[Document] | AsyncIterator[Document],
+        filtered_config: SourcesConfig,
+        batch_uris: set[str] | None = None,
     ) -> dict[str, list[Document]]:
-        """Detect changes in documents efficiently."""
+        """Detect changes in documents efficiently.
+        
+        Args:
+            documents: Documents to check for changes
+            filtered_config: Filtered source configuration
+            batch_uris: Optional set of URIs in current batch. If provided, only
+                       these URIs will be queried from state, enabling bounded-memory
+                       operation on large document sets.
+        """
         if not self._initialized:
             raise RuntimeError(
                 "StateChangeDetector not initialized. Use as async context manager."
             )
 
-        self.logger.info("Starting change detection", document_count=len(documents))
+        # Convert async iterator to list if needed, and collect URIs for optimization
+        if isinstance(documents, list):
+            document_list = documents
+            document_iterator = documents
+            self.logger.info(
+                "Starting change detection", document_count=len(documents)
+            )
+        else:
+            # Materialize the stream to collect URIs for efficient state querying
+            document_list = []
+            async for doc in documents:
+                document_list.append(doc)
+            document_iterator = document_list
+            self.logger.info(
+                "Starting change detection for streamed documents",
+                document_count=len(document_list),
+            )
+            
+            # If not provided, extract URIs from materialized batch for bounded memory
+            if batch_uris is None:
+                batch_uris = {
+                    self._generate_uri_from_document(doc) for doc in document_list
+                }
 
-        # Get current and previous states
-        current_states = [self._get_document_state(doc) for doc in documents]
-        previous_states = await self._get_previous_states(filtered_config)
-
-        # Create lookup sets/dicts for efficient comparison
-        previous_uris: set[str] = {state.uri for state in previous_states}
+        # Get previous states for the configured sources
+        # If batch_uris provided, query only those URIs for bounded memory usage
+        previous_states = await self._get_previous_states(
+            filtered_config, batch_uris=batch_uris
+        )
         previous_states_dict: dict[str, DocumentState] = {
             state.uri: state for state in previous_states
         }
-        current_uris: set[str] = {state.uri for state in current_states}
+        previous_uris: set[str] = set(previous_states_dict.keys())
+        current_uris: set[str] = set()
 
-        # Find changes efficiently
-        new_docs = [
-            doc
-            for state, doc in zip(current_states, documents, strict=False)
-            if state.uri not in previous_uris
-        ]
+        new_docs: list[Document] = []
+        updated_docs: list[Document] = []
 
-        updated_docs = [
-            doc
-            for state, doc in zip(current_states, documents, strict=False)
-            if state.uri in previous_states_dict
-            and self._is_document_updated(state, previous_states_dict[state.uri])
-        ]
+        async for document in self._iterate_documents(document_iterator):
+            current_state = self._get_document_state(document)
+            current_uris.add(current_state.uri)
+
+            previous_state = previous_states_dict.get(current_state.uri)
+            if previous_state is None:
+                new_docs.append(document)
+            elif self._is_document_updated(current_state, previous_state):
+                updated_docs.append(document)
 
         deleted_docs = [
             self._create_deleted_document(state)
             for state in previous_states
             if state.uri not in current_uris
         ]
-
-        changes = {
-            "new": new_docs,
-            "updated": updated_docs,
-            "deleted": deleted_docs,
-        }
 
         self.logger.info(
             "Change detection completed",
@@ -111,7 +138,21 @@ class StateChangeDetector:
             deleted_count=len(deleted_docs),
         )
 
-        return changes
+        return {
+            "new": new_docs,
+            "updated": updated_docs,
+            "deleted": deleted_docs,
+        }
+
+    async def _iterate_documents(
+        self, documents: list[Document] | AsyncIterator[Document]
+    ) -> AsyncIterator[Document]:
+        if isinstance(documents, list):
+            for document in documents:
+                yield document
+        else:
+            async for document in documents:
+                yield document
 
     def _get_document_state(self, document: Document) -> DocumentState:
         """Get the standardized state of a document."""
@@ -156,9 +197,15 @@ class StateChangeDetector:
         )
 
     async def _get_previous_states(
-        self, filtered_config: SourcesConfig
+        self, filtered_config: SourcesConfig, batch_uris: set[str] | None = None
     ) -> list[DocumentState]:
-        """Get previous document states from the state manager efficiently."""
+        """Get previous document states from the state manager efficiently.
+        
+        Args:
+            filtered_config: Source configuration
+            batch_uris: Optional set of URIs to filter by. If provided, only states
+                       matching these URIs will be loaded, enabling bounded memory.
+        """
         previous_states_records: list[DocumentStateRecord] = []
 
         # Define source type mappings for cleaner iteration
@@ -179,8 +226,8 @@ class StateChangeDetector:
                     )
                     previous_states_records.extend(records)
 
-        # Convert records to states efficiently
-        return [
+        # Convert records to states, optionally filtering by batch URIs
+        states = [
             DocumentState(
                 document_id=record.document_id,  # type: ignore
                 uri=self._generate_uri(
@@ -191,6 +238,17 @@ class StateChangeDetector:
             )
             for record in previous_states_records
         ]
+        
+        # If batch_uris provided, filter to only those URIs for bounded memory
+        if batch_uris:
+            states = [state for state in states if state.uri in batch_uris]
+            self.logger.debug(
+                "Filtered previous states to batch URIs",
+                requested_uris=len(batch_uris),
+                matching_states=len(states),
+            )
+        
+        return states
 
     def _normalize_url(self, url: str) -> str:
         """Normalize a URL for consistent hashing."""

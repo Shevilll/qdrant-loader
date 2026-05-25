@@ -2,7 +2,7 @@
 
 import asyncio
 from abc import abstractmethod
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import datetime
 from urllib.parse import urlparse  # noqa: F401 - may be used in URL handling
 
@@ -445,6 +445,107 @@ class BaseJiraConnector(BaseConnector):
         ]
 
         return attachment_metadata
+
+    async def stream_documents(self, since: datetime | None = None) -> AsyncIterator[Document]:
+        """Stream documents from Jira for ingestion."""
+        async for issue in self.get_issues(updated_after=since):
+            content_parts = [issue.summary]
+            if issue.description:
+                content_parts.append(issue.description)
+
+            for comment in issue.comments:
+                content_parts.append(
+                    f"\nComment by {comment.author.display_name} on {comment.created.strftime('%Y-%m-%d %H:%M')}:"
+                )
+                content_parts.append(comment.body)
+
+            content = "\n\n".join(content_parts)
+            metadata = {
+                "project": self.config.project_key,
+                "issue_type": issue.issue_type,
+                "status": issue.status,
+                "key": issue.key,
+                "priority": issue.priority,
+                "labels": issue.labels,
+                "reporter": issue.reporter.display_name if issue.reporter else None,
+                "assignee": issue.assignee.display_name if issue.assignee else None,
+                "created": issue.created.isoformat(),
+                "updated": issue.updated.isoformat(),
+                "parent_key": issue.parent_key,
+                "subtasks": issue.subtasks,
+                "linked_issues": issue.linked_issues,
+                "comments": [
+                    {
+                        "id": comment.id,
+                        "body": comment.body,
+                        "created": comment.created.isoformat(),
+                        "updated": (
+                            comment.updated.isoformat() if comment.updated else None
+                        ),
+                        "author": (
+                            comment.author.display_name if comment.author else None
+                        ),
+                    }
+                    for comment in issue.comments
+                ],
+                "attachments": (
+                    [
+                        {
+                            "id": att.id,
+                            "filename": att.filename,
+                            "size": att.size,
+                            "mime_type": att.mime_type,
+                            "created": att.created.isoformat(),
+                            "author": (att.author.display_name if att.author else None),
+                        }
+                        for att in issue.attachments
+                    ]
+                    if issue.attachments
+                    else []
+                ),
+            }
+            if self.config.extra_fields:
+                for field in self.config.extra_fields:
+                    metadata[field.name] = getattr(issue, field.name)
+
+            base_url = str(self.config.base_url).rstrip("/")
+            document = Document(
+                id=issue.id,
+                content=content,
+                content_type="text",
+                source=self.config.source,
+                source_type=SourceType.JIRA,
+                created_at=issue.created,
+                url=f"{base_url}/browse/{issue.key}",
+                title=issue.summary,
+                updated_at=issue.updated,
+                is_deleted=False,
+                metadata=metadata,
+            )
+            yield document
+
+            if self.config.download_attachments and self.attachment_reader:
+                attachment_metadata = self._get_issue_attachments(issue)
+                if attachment_metadata:
+                    logger.info(
+                        "Processing attachments for JIRA issue",
+                        issue_key=issue.key,
+                        attachment_count=len(attachment_metadata),
+                    )
+
+                    attachment_documents = (
+                        await self.attachment_reader.fetch_and_process(
+                            attachment_metadata, document
+                        )
+                    )
+                    for attachment_document in attachment_documents:
+                        yield attachment_document
+
+                    logger.debug(
+                        "Processed attachments for JIRA issue",
+                        issue_key=issue.key,
+                        processed_count=len(attachment_documents),
+                    )
 
     async def get_documents(self) -> list[Document]:
         """Fetch and process documents from Jira.

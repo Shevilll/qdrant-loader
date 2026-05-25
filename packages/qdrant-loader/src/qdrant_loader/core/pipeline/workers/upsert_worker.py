@@ -26,6 +26,25 @@ class PipelineResult:
         self.failed_document_ids: set[str] = set()
         self.errors: list[str] = []
 
+    def merge(self, other: "PipelineResult") -> None:
+        """Merge another PipelineResult into this one."""
+        self.success_count += other.success_count
+        self.error_count += other.error_count
+        self.successfully_processed_documents |= other.successfully_processed_documents
+        self.failed_document_ids |= other.failed_document_ids
+        self.errors.extend(other.errors)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, PipelineResult):
+            return NotImplemented
+        return (
+            self.success_count == other.success_count
+            and self.error_count == other.error_count
+            and self.successfully_processed_documents == other.successfully_processed_documents
+            and self.failed_document_ids == other.failed_document_ids
+            and self.errors == other.errors
+        )
+
 
 class UpsertWorker(BaseWorker):
     """Handles upserting embedded chunks to Qdrant."""

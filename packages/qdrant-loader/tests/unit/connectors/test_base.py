@@ -1,5 +1,6 @@
 """Tests for the connectors base module."""
 
+from datetime import datetime, UTC
 from unittest.mock import Mock
 
 import pytest
@@ -61,19 +62,93 @@ class TestBaseConnector:
         with pytest.raises(TypeError):
             BaseConnector()
 
-    def test_concrete_subclass_must_implement_get_documents(self):
-        """Test that concrete subclasses must implement get_documents."""
+    def test_concrete_subclass_must_implement_either_get_or_stream_documents(self):
+        """Test that concrete subclasses must implement either get_documents or stream_documents."""
 
-        class IncompleteConnector(BaseConnector):
+        with pytest.raises(TypeError):
+            class IncompleteConnector(BaseConnector):
+                def __init__(self, config=None):
+                    if config is None:
+                        config = Mock()
+                    super().__init__(config)
+
+                # Missing both get_documents and stream_documents implementation
+
+        with pytest.raises(TypeError):
+            class OtherIncompleteConnector(BaseConnector):
+                def __init__(self, config=None):
+                    if config is None:
+                        config = Mock()
+                    super().__init__(config)
+
+    def test_get_documents_delegates_to_stream_documents(self):
+        """Test that get_documents falls back to stream_documents."""
+
+        class TestConnector(BaseConnector):
             def __init__(self, config=None):
                 if config is None:
                     config = Mock()
                 super().__init__(config)
 
-            # Missing get_documents implementation
+            async def stream_documents(self):
+                yield Document(
+                    id="1",
+                    content="hello",
+                    content_type="text",
+                    source="s",
+                    source_type="t",
+                    created_at=datetime.now(UTC),
+                    url="http://example.com",
+                    title="Example",
+                    updated_at=datetime.now(UTC),
+                    is_deleted=False,
+                    metadata={},
+                )
 
-        with pytest.raises(TypeError):
-            IncompleteConnector()
+        connector = TestConnector()
+        result = pytest.importorskip("asyncio").run(connector.get_documents())
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0].id == "1"
+
+    def test_stream_documents_delegates_to_get_documents(self):
+        """Test that stream_documents falls back to get_documents."""
+
+        class TestConnector(BaseConnector):
+            def __init__(self, config=None):
+                if config is None:
+                    config = Mock()
+                super().__init__(config)
+
+            async def get_documents(self):
+                return [
+                    Document(
+                        id="1",
+                        content="hello",
+                        content_type="text",
+                        source="s",
+                        source_type="t",
+                        created_at=datetime.now(UTC),
+                        url="http://example.com",
+                        title="Example",
+                        updated_at=datetime.now(UTC),
+                        is_deleted=False,
+                        metadata={},
+                    )
+                ]
+
+        connector = TestConnector()
+        documents = []
+
+        async def collect():
+            async for doc in connector.stream_documents():
+                documents.append(doc)
+
+        import asyncio
+
+        asyncio.run(collect())
+        assert len(documents) == 1
+        assert documents[0].id == "1"
 
     def test_set_file_conversion_config_with_none_config(self):
         """Test set_file_conversion_config with None config - covers line 35."""

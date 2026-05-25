@@ -1,7 +1,7 @@
 """Source processor for handling different source types."""
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 
 from qdrant_loader.config.source_config import SourceConfig
 from qdrant_loader.connectors.base import BaseConnector, ConnectorConfigurationError
@@ -98,3 +98,58 @@ class SourceProcessor:
                 f"📥 {source_type}: {len(all_documents)} documents from {len(source_configs)} sources"
             )
         return all_documents
+
+    async def process_source_type_stream(
+        self,
+        source_configs: Mapping[str, SourceConfig],
+        connector_factory: Callable[[SourceConfig], BaseConnector],
+        source_type: str,
+    ) -> AsyncIterator[Document]:
+        """Stream documents from a specific source type.
+
+        Args:
+            source_configs: Mapping of source name to source configuration
+            connector_factory: Factory function that creates a connector from a source config
+            source_type: The type of source being processed
+
+        Yields:
+            Document objects from all configured sources of this type
+        """
+        logger.debug(f"Streaming {source_type} sources: {list(source_configs.keys())}")
+
+        for source_name, source_config in source_configs.items():
+            if self.shutdown_event.is_set():
+                logger.info(
+                    f"Shutdown requested, skipping {source_type} source: {source_name}"
+                )
+                break
+
+            try:
+                logger.debug(f"Streaming {source_type} source: {source_name}")
+
+                connector = connector_factory(source_config)
+
+                if (
+                    self.file_conversion_config
+                    and hasattr(connector, "set_file_conversion_config")
+                    and hasattr(source_config, "enable_file_conversion")
+                    and source_config.enable_file_conversion
+                ):
+                    logger.debug(
+                        f"Setting file conversion config for {source_type} source: {source_name}"
+                    )
+                    connector.set_file_conversion_config(self.file_conversion_config)
+
+                async with connector:
+                    async for document in connector.stream_documents(None):
+                        yield document
+
+            except ConnectorConfigurationError:
+                raise
+            except Exception as e:
+                safe_error = sanitize_exception_message(e)
+                logger.error(
+                    f"Failed to stream {source_type} source {source_name}: {safe_error}",
+                    error_type=type(e).__name__,
+                )
+                continue

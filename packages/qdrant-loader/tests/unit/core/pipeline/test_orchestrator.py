@@ -113,8 +113,13 @@ class TestPipelineOrchestrator:
 
         # Configure mocks
         self.source_filter.filter_sources.return_value = filtered_config
-        self.orchestrator._collect_documents_from_sources = AsyncMock(
-            return_value=mock_documents
+
+        async def _document_stream():
+            for document in mock_documents:
+                yield document
+
+        self.orchestrator._stream_documents_from_sources = Mock(
+            return_value=_document_stream()
         )
         self.orchestrator._detect_document_changes = AsyncMock(
             return_value=mock_documents
@@ -132,16 +137,17 @@ class TestPipelineOrchestrator:
         self.source_filter.filter_sources.assert_called_once_with(
             self.mock_sources_config, None, None
         )
-        self.orchestrator._collect_documents_from_sources.assert_called_once_with(
+        self.orchestrator._stream_documents_from_sources.assert_called_once_with(
             filtered_config, None
         )
-        self.orchestrator._detect_document_changes.assert_called_once_with(
-            mock_documents, filtered_config, None
-        )
-        self.document_pipeline.process_documents.assert_called_once_with(mock_documents)
-        self.orchestrator._update_document_states.assert_called_once_with(
-            mock_documents, {"doc1", "doc2"}, None
-        )
+        assert self.orchestrator._detect_document_changes.call_count == 1
+        detect_args = self.orchestrator._detect_document_changes.call_args.args
+        assert hasattr(detect_args[0], "__aiter__")
+        assert detect_args[1:] == (filtered_config, None)
+        self.document_pipeline.process_documents.assert_called_once()
+        process_args = self.document_pipeline.process_documents.call_args
+        assert process_args.args[0] == mock_documents
+        assert "on_batch_complete" in process_args.kwargs
 
     @pytest.mark.asyncio
     async def test_process_documents_with_custom_sources_config(self):
@@ -152,8 +158,13 @@ class TestPipelineOrchestrator:
 
         # Setup mocks
         self.source_filter.filter_sources.return_value = filtered_config
-        self.orchestrator._collect_documents_from_sources = AsyncMock(
-            return_value=mock_documents
+
+        async def _document_stream():
+            for document in mock_documents:
+                yield document
+
+        self.orchestrator._stream_documents_from_sources = Mock(
+            return_value=_document_stream()
         )
         self.orchestrator._detect_document_changes = AsyncMock(
             return_value=mock_documents
@@ -190,8 +201,13 @@ class TestPipelineOrchestrator:
 
         # Setup mocks
         self.source_filter.filter_sources.return_value = filtered_config
-        self.orchestrator._collect_documents_from_sources = AsyncMock(
-            return_value=mock_documents
+
+        async def _document_stream():
+            for document in mock_documents:
+                yield document
+
+        self.orchestrator._stream_documents_from_sources = Mock(
+            return_value=_document_stream()
         )
         self.orchestrator._detect_document_changes = AsyncMock(
             return_value=mock_documents
@@ -213,16 +229,17 @@ class TestPipelineOrchestrator:
         self.source_filter.filter_sources.assert_called_once_with(
             self.mock_sources_config, "git", "my-repo"
         )
-        self.orchestrator._collect_documents_from_sources.assert_called_once_with(
+        self.orchestrator._stream_documents_from_sources.assert_called_once_with(
             filtered_config, None
         )
-        self.orchestrator._detect_document_changes.assert_called_once_with(
-            mock_documents, filtered_config, None
-        )
-        self.document_pipeline.process_documents.assert_called_once_with(mock_documents)
-        self.orchestrator._update_document_states.assert_called_once_with(
-            mock_documents, {"doc1"}, None
-        )
+        assert self.orchestrator._detect_document_changes.call_count == 1
+        detect_args = self.orchestrator._detect_document_changes.call_args.args
+        assert hasattr(detect_args[0], "__aiter__")
+        assert detect_args[1:] == (filtered_config, None)
+        self.document_pipeline.process_documents.assert_called_once()
+        process_args = self.document_pipeline.process_documents.call_args
+        assert process_args.args[0] == mock_documents
+        assert "on_batch_complete" in process_args.kwargs
 
     @pytest.mark.asyncio
     async def test_process_documents_no_sources_found(self):
@@ -257,7 +274,14 @@ class TestPipelineOrchestrator:
 
         # Setup mocks
         self.source_filter.filter_sources.return_value = filtered_config
-        self.orchestrator._collect_documents_from_sources = AsyncMock(return_value=[])
+
+        async def _document_stream():
+            if False:
+                yield None
+
+        self.orchestrator._stream_documents_from_sources = Mock(
+            return_value=_document_stream()
+        )
         self.orchestrator._detect_document_changes = AsyncMock(return_value=[])
 
         # Execute
@@ -267,7 +291,7 @@ class TestPipelineOrchestrator:
 
         # Verify
         assert result == []
-        self.orchestrator._collect_documents_from_sources.assert_called_once_with(
+        self.orchestrator._stream_documents_from_sources.assert_called_once_with(
             filtered_config, None
         )
 
@@ -279,8 +303,13 @@ class TestPipelineOrchestrator:
 
         # Setup mocks
         self.source_filter.filter_sources.return_value = filtered_config
-        self.orchestrator._collect_documents_from_sources = AsyncMock(
-            return_value=mock_documents
+
+        async def _document_stream():
+            for document in mock_documents:
+                yield document
+
+        self.orchestrator._stream_documents_from_sources = Mock(
+            return_value=_document_stream()
         )
         self.orchestrator._detect_document_changes = AsyncMock(return_value=[])
 
@@ -291,17 +320,24 @@ class TestPipelineOrchestrator:
 
         # Verify
         assert result == []
-        self.orchestrator._detect_document_changes.assert_called_once_with(
-            mock_documents, filtered_config, None
-        )
+        assert self.orchestrator._detect_document_changes.call_count == 1
+        detect_args = self.orchestrator._detect_document_changes.call_args.args
+        assert hasattr(detect_args[0], "__aiter__")
+        assert detect_args[1:] == (filtered_config, None)
 
     @pytest.mark.asyncio
     async def test_process_documents_exception_handling(self):
         """Test document processing exception handling."""
         filtered_config = make_rich_compatible_mock(spec=SourcesConfig)
         self.source_filter.filter_sources.return_value = filtered_config
-        self.orchestrator._collect_documents_from_sources = AsyncMock(
-            side_effect=Exception("Collection failed")
+
+        async def _document_stream():
+            if False:
+                yield None
+
+        self.orchestrator._stream_documents_from_sources = Mock(
+            side_effect=Exception("Collection failed"),
+            return_value=_document_stream(),
         )
 
         # Patch the logger to prevent Rich formatting issues during exception logging
@@ -330,26 +366,34 @@ class TestPipelineOrchestrator:
         publicdocs_docs = [Mock(spec=Document, id="publicdocs_doc")]
         localfile_docs = [Mock(spec=Document, id="localfile_doc")]
 
-        # Configure source processor mock
-        self.source_processor.process_source_type.side_effect = [
-            confluence_docs,
-            git_docs,
-            jira_docs,
-            publicdocs_docs,
-            localfile_docs,
+        # Helper to create async generator from list
+        async def async_gen(items):
+            for item in items:
+                yield item
+
+        # Configure source processor mock to return async generators
+        self.source_processor.process_source_type_stream.side_effect = [
+            async_gen(confluence_docs),
+            async_gen(git_docs),
+            async_gen(jira_docs),
+            async_gen(publicdocs_docs),
+            async_gen(localfile_docs),
         ]
 
         # Execute
-        result = await self.orchestrator._collect_documents_from_sources(
-            filtered_config, None
-        )
+        result = [
+            document
+            async for document in self.orchestrator._stream_documents_from_sources(
+                filtered_config, None
+            )
+        ]
 
         # Verify
         expected_docs = (
             confluence_docs + git_docs + jira_docs + publicdocs_docs + localfile_docs
         )
         assert result == expected_docs
-        assert self.source_processor.process_source_type.call_count == 5
+        assert self.source_processor.process_source_type_stream.call_count == 5
 
     @pytest.mark.asyncio
     async def test_collect_documents_from_sources_selective(self):
@@ -366,20 +410,28 @@ class TestPipelineOrchestrator:
         confluence_docs = [Mock(spec=Document, id="confluence_doc")]
         git_docs = [Mock(spec=Document, id="git_doc")]
 
-        self.source_processor.process_source_type.side_effect = [
-            confluence_docs,
-            git_docs,
+        # Helper to create async generator from list
+        async def async_gen(items):
+            for item in items:
+                yield item
+
+        self.source_processor.process_source_type_stream.side_effect = [
+            async_gen(confluence_docs),
+            async_gen(git_docs),
         ]
 
         # Execute
-        result = await self.orchestrator._collect_documents_from_sources(
-            filtered_config, None
-        )
+        result = [
+            document
+            async for document in self.orchestrator._stream_documents_from_sources(
+                filtered_config, None
+            )
+        ]
 
         # Verify
         expected_docs = confluence_docs + git_docs
         assert result == expected_docs
-        assert self.source_processor.process_source_type.call_count == 2
+        assert self.source_processor.process_source_type_stream.call_count == 2
 
     @pytest.mark.asyncio
     async def test_collect_documents_from_sources_empty(self):
@@ -393,9 +445,12 @@ class TestPipelineOrchestrator:
         filtered_config.localfile = None
 
         # Execute
-        result = await self.orchestrator._collect_documents_from_sources(
-            filtered_config, None
-        )
+        result = [
+            document
+            async for document in self.orchestrator._stream_documents_from_sources(
+                filtered_config, None
+            )
+        ]
 
         # Verify
         assert result == []

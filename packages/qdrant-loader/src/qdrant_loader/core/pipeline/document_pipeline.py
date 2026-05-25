@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 from qdrant_loader.core.document import Document
 from qdrant_loader.utils.logging import LoggingConfig
@@ -25,55 +26,83 @@ class DocumentPipeline:
         self.embedding_worker = embedding_worker
         self.upsert_worker = upsert_worker
 
-    async def process_documents(self, documents: list[Document]) -> PipelineResult:
+    async def process_documents(
+        self,
+        documents: list[Document] | AsyncIterator[Document],
+        batch_size: int = 25,
+        on_batch_complete: Callable[[list[Document], PipelineResult], Awaitable[None]] | None = None,
+    ) -> PipelineResult:
         """Process documents through the pipeline.
 
         Args:
-            documents: List of documents to process
+            documents: List or async iterator of documents to process
+            batch_size: Number of documents to process in each batch
+            on_batch_complete: Optional callback invoked after each batch is processed
 
         Returns:
             PipelineResult with processing statistics
         """
-        logger.info(f"⚙️ Processing {len(documents)} documents through pipeline")
+        if isinstance(documents, list):
+            document_iter = documents
+            total_documents = len(documents)
+        else:
+            document_iter = documents
+            total_documents = None
+
+        if total_documents is not None:
+            logger.info(
+                f"⚙️ Processing {total_documents} documents through pipeline"
+                + (f" (expected {total_documents} documents)" if total_documents is not None else "")
+            )
+        else:
+            logger.info("⚙️ Processing documents through pipeline")
+
         start_time = time.time()
 
         try:
-            # Step 1: Chunk documents
-            logger.info("🔄 Starting chunking phase...")
-            chunking_start = time.time()
-            chunks_iter = self.chunking_worker.process_documents(documents)
+            batch: list[Document] = []
+            result = PipelineResult()
 
-            # Step 2: Generate embeddings
-            logger.info("🔄 Chunking completed, transitioning to embedding phase...")
-            chunking_duration = time.time() - chunking_start
-            logger.info(f"⏱️ Chunking phase took {chunking_duration:.2f} seconds")
+            if total_documents is not None:
+                logger.debug(f"🧾 Total documents to process: {total_documents}")
 
-            embedding_start = time.time()
-            embedded_chunks_iter = self.embedding_worker.process_chunks(chunks_iter)
+            async def _get_document_iterator():
+                if isinstance(document_iter, list):
+                    for document in document_iter:
+                        yield document
+                else:
+                    async for document in document_iter:
+                        yield document
 
-            # Step 3: Upsert to Qdrant
-            logger.info("🔄 Embedding phase ready, starting upsert phase...")
+            async for document in _get_document_iterator():
+                batch.append(document)
+                if len(batch) < batch_size:
+                    continue
 
-            # Add timeout for the entire pipeline to prevent indefinite hanging
-            try:
-                result = await asyncio.wait_for(
-                    self.upsert_worker.process_embedded_chunks(embedded_chunks_iter),
-                    timeout=3600.0,  # 1 hour timeout for the entire pipeline
-                )
-            except TimeoutError:
-                logger.error("❌ Pipeline timed out after 1 hour")
-                result = PipelineResult()
-                result.error_count = len(documents)
-                result.errors = ["Pipeline timed out after 1 hour"]
-                return result
+                logger.info(f"🔄 Processing document batch of {len(batch)} documents")
+                batch_result = await self._process_document_batch(batch)
+                result.merge(batch_result)
+                if on_batch_complete is not None:
+                    await on_batch_complete(batch, batch_result)
+                batch.clear()
+
+            if total_documents == 0:
+                logger.info("🔄 Processing final document batch of 0 documents")
+                batch_result = await self._process_document_batch([])
+                result.merge(batch_result)
+                if on_batch_complete is not None:
+                    await on_batch_complete([], batch_result)
+            elif batch:
+                logger.info(f"🔄 Processing final document batch of {len(batch)} documents")
+                batch_result = await self._process_document_batch(batch)
+                result.merge(batch_result)
+                if on_batch_complete is not None:
+                    await on_batch_complete(batch, batch_result)
 
             total_duration = time.time() - start_time
-            embedding_duration = time.time() - embedding_start
-
             logger.info(
-                f"⏱️ Embedding + Upsert phase took {embedding_duration:.2f} seconds"
+                f"⏱️ Total pipeline duration: {total_duration:.2f} seconds"
             )
-            logger.info(f"⏱️ Total pipeline duration: {total_duration:.2f} seconds")
             logger.info(
                 f"✅ Pipeline completed: {result.success_count} chunks processed, "
                 f"{result.error_count} errors"
@@ -87,8 +116,47 @@ class DocumentPipeline:
                 f"❌ Document pipeline failed after {total_duration:.2f} seconds: {e}",
                 exc_info=True,
             )
-            # Return a result with error information
             result = PipelineResult()
-            result.error_count = len(documents)
+            result.error_count = total_documents if total_documents is not None else 0
             result.errors = [f"Pipeline failed: {e}"]
             return result
+
+    async def _process_document_batch(
+        self, batch: list[Document]
+    ) -> PipelineResult:
+        logger.info("🔄 Starting chunking phase...")
+        chunking_start = time.time()
+        chunks_iter = self.chunking_worker.process_documents(batch)
+
+        logger.info(
+            "🔄 Chunking completed, transitioning to embedding phase..."
+        )
+        chunking_duration = time.time() - chunking_start
+        logger.info(f"⏱️ Chunking phase took {chunking_duration:.2f} seconds")
+
+        embedding_start = time.time()
+        embedded_chunks_iter = self.embedding_worker.process_chunks(chunks_iter)
+
+        logger.info("🔄 Embedding phase ready, starting upsert phase...")
+
+        try:
+            result = await asyncio.wait_for(
+                self.upsert_worker.process_embedded_chunks(embedded_chunks_iter),
+                timeout=3600.0,
+            )
+            embedding_duration = time.time() - embedding_start
+            logger.info(
+                f"⏱️ Embedding + Upsert phase took {embedding_duration:.2f} seconds"
+            )
+        except TimeoutError:
+            logger.error("❌ Pipeline timed out after 1 hour")
+            result = PipelineResult()
+            result.error_count = len(batch)
+            result.errors = ["Pipeline timed out after 1 hour"]
+        except Exception as e:
+            logger.error(f"❌ Pipeline failed during batch processing: {e}")
+            result = PipelineResult()
+            result.error_count = len(batch)
+            result.errors = [f"Pipeline failed: {e}"]
+
+        return result
