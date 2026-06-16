@@ -137,6 +137,7 @@ async def get_document_state_records(
         query = select(DocumentStateRecord).filter(
             DocumentStateRecord.source_type == source_type,
             DocumentStateRecord.source == source,
+            DocumentStateRecord.is_deleted.is_(False),
         )
         if since:
             query = query.filter(DocumentStateRecord.updated_at >= since)

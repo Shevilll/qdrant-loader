@@ -3,6 +3,7 @@
 import traceback
 from collections.abc import AsyncIterator
 from datetime import datetime
+from urllib.parse import quote
 
 from qdrant_loader.config import Settings, SourcesConfig
 from qdrant_loader.connectors.base import ConnectorConfigurationError
@@ -103,11 +104,14 @@ class PipelineOrchestrator:
                             project_id=project_id,
                         )
 
-                # Track seen URIs for potential post-stream reconciliation
+                # Track seen URIs for post-stream deletion reconciliation.
+                # Must use the same encoding as StateChangeDetector._generate_uri.
                 if seen_uris is not None:
                     try:
-                        uri = f"{document.source_type}:{document.source}:{document.url.rstrip('/') }"
-                        seen_uris.add(uri)
+                        normalized = quote(document.url.rstrip("/"), safe="")
+                        seen_uris.add(
+                            f"{document.source_type}:{document.source}:{normalized}"
+                        )
                     except Exception:
                         pass
 
@@ -316,6 +320,15 @@ class PipelineOrchestrator:
                     logger.info("✅ No documents found from sources")
                     return []
 
+                # Post-stream deletion reconciliation: remove from Qdrant any
+                # document that was active in the state DB but absent from the
+                # current snapshot.  Runs even when nothing was new/updated so
+                # deletions are handled independently of upserts.
+                if total_documents > 0:
+                    await self._reconcile_deletions(
+                        filtered_config, seen_uris, current_project_id
+                    )
+
                 if not force and not processed_documents:
                     self.last_pipeline_result = aggregated_result
                     if aggregated_result.error_count > 0:
@@ -326,21 +339,6 @@ class PipelineOrchestrator:
                     else:
                         logger.info("No new or updated documents to process")
                     return []
-
-                    # Deletion detection / reconciliation note:
-                    # Streaming classification only detects new/updated documents
-                    # per-batch. Full deletion detection (documents present in the
-                    # state DB but absent from the current snapshot across all
-                    # batches) requires a post-stream reconciliation (WS-3).
-                    # For now we only log that reconciliation is possible and
-                    # record the set of seen URIs; implementors can enable a
-                    # reconciliation pass that compares previous state URIs to
-                    # `seen_uris` and call `_process_deleted_documents`.
-                    if not force:
-                        logger.debug(
-                            "Post-stream reconciliation not enabled. Seen URIs collected for potential WS-3 reconciliation",
-                            seen_count=len(seen_uris),
-                        )
 
                 self.last_pipeline_result = aggregated_result
                 logger.info(
@@ -569,6 +567,37 @@ class PipelineOrchestrator:
                 error_type=type(e).__name__,
             )
             raise
+
+    async def _reconcile_deletions(
+        self,
+        filtered_config: SourcesConfig,
+        seen_uris: set[str],
+        project_id: str | None = None,
+    ) -> None:
+        """Delete Qdrant points for documents no longer present in any source.
+
+        Compares the URIs seen during the current streaming pass against
+        the state DB.  Any record that is active in the DB but absent from
+        ``seen_uris`` means the underlying source file/page was removed.
+        """
+        if not self.components.state_manager._initialized:
+            await self.components.state_manager.initialize()
+
+        async with StateChangeDetector(self.components.state_manager) as detector:
+            previous_states = await detector._get_previous_states(filtered_config)
+            deleted_documents = [
+                detector._create_deleted_document(state)
+                for state in previous_states
+                if state.uri not in seen_uris
+            ]
+
+        if deleted_documents:
+            logger.info(
+                f"🗑️ Post-stream reconciliation: {len(deleted_documents)} documents removed from sources"
+            )
+            await self._process_deleted_documents(deleted_documents, project_id)
+        else:
+            logger.debug("Post-stream reconciliation: no orphaned documents detected")
 
     async def _process_deleted_documents(
         self,
