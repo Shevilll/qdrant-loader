@@ -76,7 +76,7 @@ class JiraEntityExtractor(BaseEntityExtractor):
         metadata = doc.metadata
 
         return GraphNode(
-            id=doc.id,
+            id=metadata.get("key"),
             label=CoreNodeLabel.DOCUMENT,
             project=project,
             properties={
@@ -152,7 +152,7 @@ class JiraEntityExtractor(BaseEntityExtractor):
             return None
 
         return GraphNode(
-            id=f"jira:{project_key}",
+            id=project_key,
             label=CoreNodeLabel.CONTAINER,
             project=project_key,
             properties={
@@ -169,14 +169,15 @@ class JiraEntityExtractor(BaseEntityExtractor):
         self,
         doc: Document,
     ) -> list[GraphNode]:
+        metadata = doc.metadata
         project = self._project(doc)
 
         nodes: list[GraphNode] = []
 
-        for label in doc.metadata.get("labels", []):
+        for label in metadata.get("labels", []):
             nodes.append(
                 GraphNode(
-                    id=f"label:{label}",
+                    id=label,
                     label=CoreNodeLabel.LABEL,
                     project=project,
                     properties={
@@ -194,6 +195,7 @@ class JiraEntityExtractor(BaseEntityExtractor):
         self,
         doc: Document,
     ) -> tuple[list[GraphNode], list[GraphEdge]]:
+        metadata = doc.metadata
         project = self._project(doc)
 
         text = doc.metadata.get("description") or getattr(doc, "content", "") or ""
@@ -223,7 +225,7 @@ class JiraEntityExtractor(BaseEntityExtractor):
 
             edges.append(
                 GraphEdge(
-                    source=doc.id,
+                    source=metadata.get("key"),
                     target=target,
                     edge_type=CoreEdgeType.LINKS_TO,
                     project=project,
@@ -247,28 +249,31 @@ class JiraEntityExtractor(BaseEntityExtractor):
         self,
         doc: Document,
     ) -> tuple[list[GraphNode], list[GraphEdge]]:
+        edges: list[GraphEdge] = []
+        metadata = doc.metadata
         project = self._project(doc)
 
-        edges: list[GraphEdge] = []
-
-        metadata = doc.metadata
-
         # --------------------------------------------------------------
-        # Linked Issues
+        # Linked Issues (with typed links)
         # --------------------------------------------------------------
+        linked_issues = metadata.get("linked_issues") or []
+        for item in linked_issues:
+            link_type = item.get("type")
+            issue_key = item.get("key")
 
-        for issue_key in metadata.get("linked_issues", []):
+            if not issue_key:
+                continue
+
             edges.append(
                 GraphEdge(
-                    source=doc.id,
+                    source=metadata.get("key"),
                     target=issue_key,
                     edge_type=CoreEdgeType.LINKS_TO,
                     project=project,
-                    properties={
-                        "kind": "related",
-                    },
+                    properties={"kind": link_type or "unknown"},
                 )
             )
+
         # --------------------------------------------------------------
         # Parent Issue
         # --------------------------------------------------------------
@@ -278,7 +283,7 @@ class JiraEntityExtractor(BaseEntityExtractor):
         if parent_issue:
             edges.append(
                 GraphEdge(
-                    source=doc.id,
+                    source=metadata.get("key"),
                     target=parent_issue,
                     edge_type=CoreEdgeType.PART_OF,
                     project=project,

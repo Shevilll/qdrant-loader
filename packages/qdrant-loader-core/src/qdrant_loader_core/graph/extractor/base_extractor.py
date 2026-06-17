@@ -67,6 +67,10 @@ class BaseEntityExtractor(EntityExtractor):
 
     source_type: ClassVar[str]
 
+    @classmethod
+    def get_source_type(cls) -> str:
+        return cls.source_type
+
     async def extract(self, doc: Document) -> SubGraph:
         project = self._project(doc)
 
@@ -96,7 +100,7 @@ class BaseEntityExtractor(EntityExtractor):
 
             edges.append(
                 GraphEdge(
-                    source=doc.id,
+                    source=doc.metadata.get("key") if self.get_source_type() == "jira" else doc.id,
                     target=person_node.id,
                     edge_type=CoreEdgeType.AUTHORED_BY,
                     project=project,
@@ -112,7 +116,7 @@ class BaseEntityExtractor(EntityExtractor):
 
             edges.append(
                 GraphEdge(
-                    source=doc.id,
+                    source=doc.metadata.get("key") if self.get_source_type() == "jira" else doc.id,
                     target=container.id,
                     edge_type=CoreEdgeType.BELONGS_TO,
                     project=project,
@@ -127,7 +131,7 @@ class BaseEntityExtractor(EntityExtractor):
 
             edges.append(
                 GraphEdge(
-                    source=doc.id,
+                    source=doc.metadata.get("key"),
                     target=label.id,
                     edge_type=CoreEdgeType.HAS_LABEL,
                     project=project,
@@ -151,21 +155,6 @@ class BaseEntityExtractor(EntityExtractor):
             edges=edges,
         )
 
-    def _build_document_node(
-        self,
-        doc: Document,
-        project: str | None,
-    ) -> GraphNode:
-        return GraphNode(
-            id=doc.id,
-            label=CoreNodeLabel.DOCUMENT,
-            project=project,
-            properties={
-                "title": doc.title,
-                "source_type": self.source_type,
-            },
-        )
-
     def _person_node(
         self,
         person_info: PersonInfo,
@@ -183,6 +172,15 @@ class BaseEntityExtractor(EntityExtractor):
     # ------------------------------------------------------------------
     # Required hooks
     # ------------------------------------------------------------------
+    @abstractmethod
+    def _build_document_node(
+        self,
+        doc: Document,
+        project: str | None,
+    ) -> GraphNode:
+        """
+        Build the main document node.
+        """
 
     @abstractmethod
     def _project(self, doc: Document) -> str | None:

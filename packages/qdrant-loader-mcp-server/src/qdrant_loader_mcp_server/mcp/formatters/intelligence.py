@@ -404,3 +404,112 @@ class IntelligenceResultFormatters:
             formatted += f"• Original Query: {original_query}\n"
 
         return formatted
+
+    @staticmethod
+    def _get_property(obj, key):
+        properties = getattr(obj, "properties", None)
+        return properties.get(key) if properties else None
+
+    @staticmethod
+    def _get_label(node):
+        labels = getattr(node, "label", None)
+        if labels:
+            return labels[0]
+        return "Unknown"
+
+    @staticmethod
+    def format_graph(result):
+        nodes = {}
+        edges = []
+        edge_keys = set()
+
+        internal_node_id_map: dict[int, str] = {}
+
+        for row in result:
+            if not row:
+                continue
+
+            path_nodes = row[0] if len(row) > 0 else []
+            path_edges = row[1] if len(row) > 1 else []
+
+            for n in path_nodes:
+                node_id = IntelligenceResultFormatters._get_property(n, "id")
+
+                if node_id is None:
+                    continue
+
+                if hasattr(n, "id") and isinstance(n.id, int):
+                    internal_node_id_map[n.id] = node_id
+
+                if node_id not in nodes:
+                    properties = (
+                        dict(n.properties)
+                        if hasattr(n, "properties")
+                        else {}
+                    )
+
+                    nodes[node_id] = {
+                        "id": node_id,
+                        "label": IntelligenceResultFormatters._get_label(n),
+                        "project": properties.get("project"),
+                        "properties": properties,
+                    }
+
+            for r in path_edges:
+                source = None
+                target = None
+
+                if hasattr(r, "src_node"):
+                    source = (
+                        internal_node_id_map.get(r.src_node)
+                        if isinstance(r.src_node, int)
+                        else IntelligenceResultFormatters._get_property(
+                            r.src_node, "id"
+                        )
+                    )
+
+                if hasattr(r, "dest_node"):
+                    target = (
+                        internal_node_id_map.get(r.dest_node)
+                        if isinstance(r.dest_node, int)
+                        else IntelligenceResultFormatters._get_property(
+                            r.dest_node, "id"
+                        )
+                    )
+
+                if source is None or target is None:
+                    continue
+
+                edge_type = getattr(
+                    r,
+                    "edge_type",
+                    getattr(r, "relation", "UNKNOWN"),
+                )
+
+                edge_key = (source, target, edge_type)
+
+                if edge_key in edge_keys:
+                    continue
+
+                edge_keys.add(edge_key)
+
+                properties = (
+                    dict(r.properties)
+                    if hasattr(r, "properties")
+                    else {}
+                )
+
+                edges.append(
+                    {
+                        "source": source,
+                        "target": target,
+                        "edge_type": edge_type,
+                        "project": properties.get("project"),
+                        "properties": properties,
+                    }
+                )
+
+        return {
+            "nodes": list(nodes.values()),
+            "edges": edges,
+        }

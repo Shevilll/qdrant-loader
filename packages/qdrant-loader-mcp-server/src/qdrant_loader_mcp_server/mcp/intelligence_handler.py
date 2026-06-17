@@ -1,9 +1,12 @@
 """Cross-document intelligence operations handler for MCP server."""
 
 import asyncio
+import re
 import time
 import uuid
 from typing import Any
+
+from qdrant_loader_core.graph import get_graph_store
 
 from ..search.engine import SearchEngine
 from ..utils import LoggingConfig
@@ -948,3 +951,129 @@ class IntelligenceHandler:
             overflow = len(self._cluster_store) - self._max_sessions
             for k, _ in sorted_items[:overflow]:
                 self._cluster_store.pop(k, None)
+
+    async def _run_graph_query(
+        self,
+        cypher: str,
+        params: dict | None = None,
+    ):
+        store = await get_graph_store()
+        return await store.query_cypher(cypher, params or {})
+
+    _REL_TYPE_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+
+    @staticmethod
+    def _validate_depth(depth: int) -> int:
+        if depth < 1 or depth > 5:
+            raise ValueError("depth must be between 1 and 5")
+        return depth
+
+    async def find_ticket_dependencies(
+        self, request_id: str | int | None, params: dict[str, Any]
+    ):
+        """
+        Traverse Jira blocking dependencies
+        """
+
+        if "ticket_key" not in params:
+            logger.error("Missing required parameter: ticket_key")
+            return self.protocol.create_response(
+                request_id,
+                error={
+                    "code": -32602,
+                    "message": "Invalid params",
+                    "data": "Missing required parameter: ticket_key",
+                },
+            )
+        
+        if "depth" not in params:
+            logger.error("Missing required parameter: depth")
+            return self.protocol.create_response(
+                request_id,
+                error={
+                    "code": -32602,
+                    "message": "Invalid params",
+                    "data": "Missing required parameter: depth",
+                },
+            )
+        
+        depth = params.get("depth")
+        ticket_key = params.get("ticket_key")
+
+        depth = self._validate_depth(depth)
+
+        query = f"""
+        MATCH (start:Document {id: "AIKH-1757"})
+            -[rels*1..1]-
+            (node)
+        WHERE ALL(r IN rels WHERE type(r) IN ["AUTHORED_BY", "HAS_LABEL"])
+
+        RETURN collect(DISTINCT node) AS nodesllect(DISTINCT node) AS nodes
+        """
+
+
+        query_params = {
+            "ticket_key": ticket_key,
+        }
+
+        result = await self._run_graph_query(query, query_params)
+        return self.formatters.format_graph(result)
+
+    async def get_epic_tree(self, epic_key: str):
+        """
+        Get full epic hierarchy (stories + subtasks)
+        """
+
+        query = """
+        MATCH path = (epic:Document {id: $id})
+        <-[:PART_OF*]-(child:Document)
+        RETURN nodes(path), relationships(path)
+        """
+
+        result = await self._run_graph_query(query, {"id": f"jira:{epic_key}"})
+
+        return self.formatters.format_graph(result)
+
+    async def find_related_documents(
+        self,
+        document_id: str,
+        relationship_types: list[str] | None = None,
+        depth: int = 2,
+    ):
+        """
+        Generic multi-hop traversal
+        """
+
+        depth = self._validate_depth(depth)
+        rel_clause = ""
+        if relationship_types:
+            invalid = [
+                rel_type
+                for rel_type in relationship_types
+                if not self._REL_TYPE_RE.fullmatch(rel_type)
+            ]
+            if invalid:
+                raise ValueError("Invalid relationship type")
+            rel_clause = ":" + "|".join(relationship_types)
+
+        query = f"""
+        MATCH path = (start:Document {{id: $id}})
+        -[{rel_clause}*1..{depth}]-(related:Document)
+        RETURN nodes(path), relationships(path)
+        """
+
+        result = await self._run_graph_query(query, {"id": document_id})
+
+        return self.formatters.format_graph(result)
+
+    async def query_knowledge_graph(
+        self,
+        cypher: str,
+        params: dict | None = None,
+    ):
+        """
+        Raw Cypher query
+        """
+        result = await self._run_graph_query(cypher, params)
+
+        return self.formatters.format_graph(result)

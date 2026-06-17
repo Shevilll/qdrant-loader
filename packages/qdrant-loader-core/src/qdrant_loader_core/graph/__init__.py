@@ -77,7 +77,10 @@ async def get_graph_store(
                                     None,
                                 )
 
-                    except AttributeError:
+                    except Exception:
+                        # Settings may not be initialized yet (e.g. during tests or
+                        # early startup). Fall back to sensible defaults instead
+                        # of raising an error.
                         pass
 
                 _graph_store = _FalkorGraphStore(

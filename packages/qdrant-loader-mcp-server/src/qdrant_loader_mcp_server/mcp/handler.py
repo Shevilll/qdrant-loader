@@ -160,6 +160,26 @@ class MCPHandler:
                 return await self.intelligence_handler.handle_cluster_documents(
                     request_id, params
                 )
+            elif method == "find_ticket_dependencies":
+                logger.info("Handling find ticket dependencies request")
+                return await self.intelligence_handler.find_ticket_dependencies(
+                    request_id, params
+                )
+            elif method == "get_epic_tree":
+                logger.info("Handling get epic tree request")
+                return await self.intelligence_handler.get_epic_tree(
+                    request_id, params
+                )
+            elif method == "find_related_documents":
+                logger.info("Handling find related documents request")
+                return await self.intelligence_handler.find_related_documents(
+                    request_id, params
+                )
+            elif method == "query_knowledge_graph":
+                logger.info("Handling query knowledge graph request")
+                return await self.intelligence_handler.query_knowledge_graph(
+                    request_id, params
+                )
             elif method == "tools/call":
                 logger.info("Handling tools/call request")
                 tool_name = params.get("name")
@@ -212,6 +232,22 @@ class MCPHandler:
                     )
                 elif tool_name == "expand_chunk_context":
                     return await self.search_handler.handle_expand_chunk_context(
+                        request_id, params.get("arguments", {})
+                    )
+                elif tool_name == "find_ticket_dependencies":
+                    return await self.intelligence_handler.find_ticket_dependencies(
+                        request_id, params.get("arguments", {})
+                    )
+                elif tool_name == "get_epic_tree":
+                    return await self.intelligence_handler.get_epic_tree(
+                        request_id, params.get("arguments", {})
+                    )
+                elif tool_name == "find_related_documents":
+                    return await self.intelligence_handler.find_related_documents(
+                        request_id, params.get("arguments", {})
+                    )
+                elif tool_name == "query_knowledge_graph":
+                    return await self.intelligence_handler.query_knowledge_graph(
                         request_id, params.get("arguments", {})
                     )
                 else:
