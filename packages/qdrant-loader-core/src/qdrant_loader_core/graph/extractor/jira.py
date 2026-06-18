@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 if TYPE_CHECKING:
     from qdrant_loader.core.document import Document
 
+from annotated_types import doc
 from qdrant_loader_core.graph.extractor.base_extractor import (
     BaseEntityExtractor,
 )
@@ -77,7 +78,7 @@ class JiraEntityExtractor(BaseEntityExtractor):
 
         return GraphNode(
             id=metadata.get("key"),
-            label=CoreNodeLabel.DOCUMENT,
+            label=CoreNodeLabel.DOCUMENT.value,
             project=project,
             properties={
                 "title": doc.title,
@@ -85,6 +86,7 @@ class JiraEntityExtractor(BaseEntityExtractor):
                 "status": metadata.get("status"),
                 "priority": metadata.get("priority"),
                 "issue_type": metadata.get("issue_type"),
+                "metadata": metadata,
             },
         )
 
@@ -153,7 +155,7 @@ class JiraEntityExtractor(BaseEntityExtractor):
 
         return GraphNode(
             id=project_key,
-            label=CoreNodeLabel.CONTAINER,
+            label=CoreNodeLabel.CONTAINER.value,
             project=project_key,
             properties={
                 "kind": "jira_project",
@@ -178,7 +180,7 @@ class JiraEntityExtractor(BaseEntityExtractor):
             nodes.append(
                 GraphNode(
                     id=label,
-                    label=CoreNodeLabel.LABEL,
+                    label=CoreNodeLabel.LABEL.value,
                     project=project,
                     properties={
                         "name": label,
@@ -217,7 +219,7 @@ class JiraEntityExtractor(BaseEntityExtractor):
                 nodes.append(
                     GraphNode(
                         id=target,
-                        label=CoreNodeLabel.URL,
+                        label=CoreNodeLabel.URL.value,
                         project=project,
                         properties={"url": target},
                     )
@@ -227,7 +229,7 @@ class JiraEntityExtractor(BaseEntityExtractor):
                 GraphEdge(
                     source=metadata.get("key"),
                     target=target,
-                    edge_type=CoreEdgeType.LINKS_TO,
+                    edge_type=CoreEdgeType.LINKS_TO.value,
                     project=project,
                     properties={"kind": kind},
                 )
@@ -254,23 +256,18 @@ class JiraEntityExtractor(BaseEntityExtractor):
         project = self._project(doc)
 
         # --------------------------------------------------------------
-        # Linked Issues (with typed links)
+        # Linked Issues
         # --------------------------------------------------------------
-        linked_issues = metadata.get("linked_issues") or []
-        for item in linked_issues:
-            link_type = item.get("type")
-            issue_key = item.get("key")
-
-            if not issue_key:
-                continue
-
+        for issue_key in metadata.get("linked_issues", []):
             edges.append(
                 GraphEdge(
                     source=metadata.get("key"),
                     target=issue_key,
-                    edge_type=CoreEdgeType.LINKS_TO,
+                    edge_type=CoreEdgeType.LINKS_TO.value,
                     project=project,
-                    properties={"kind": link_type or "unknown"},
+                    properties={
+                        "kind": "related",
+                    },
                 )
             )
 
@@ -285,7 +282,7 @@ class JiraEntityExtractor(BaseEntityExtractor):
                 GraphEdge(
                     source=metadata.get("key"),
                     target=parent_issue,
-                    edge_type=CoreEdgeType.PART_OF,
+                    edge_type=CoreEdgeType.PART_OF.value,
                     project=project,
                     properties={
                         "kind": "subtask",
@@ -293,4 +290,4 @@ class JiraEntityExtractor(BaseEntityExtractor):
                 )
             )
 
-        return [], edges
+        return [], edges     

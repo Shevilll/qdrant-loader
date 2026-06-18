@@ -60,6 +60,7 @@ class BaseEntityExtractor(EntityExtractor):
         - Person
         - Container
         - Label
+        - Concept
 
     Source-specific nodes are extracted via
     _extract_source_specific().
@@ -102,7 +103,7 @@ class BaseEntityExtractor(EntityExtractor):
                 GraphEdge(
                     source=doc.metadata.get("key") if self.get_source_type() == "jira" else doc.id,
                     target=person_node.id,
-                    edge_type=CoreEdgeType.AUTHORED_BY,
+                    edge_type=CoreEdgeType.AUTHORED_BY.value,
                     project=project,
                     properties={"role": role},
                 )
@@ -118,7 +119,7 @@ class BaseEntityExtractor(EntityExtractor):
                 GraphEdge(
                     source=doc.metadata.get("key") if self.get_source_type() == "jira" else doc.id,
                     target=container.id,
-                    edge_type=CoreEdgeType.BELONGS_TO,
+                    edge_type=CoreEdgeType.BELONGS_TO.value,
                     project=project,
                 )
             )
@@ -133,7 +134,7 @@ class BaseEntityExtractor(EntityExtractor):
                 GraphEdge(
                     source=doc.metadata.get("key"),
                     target=label.id,
-                    edge_type=CoreEdgeType.HAS_LABEL,
+                    edge_type=CoreEdgeType.HAS_LABEL.value,
                     project=project,
                 )
             )
@@ -162,7 +163,7 @@ class BaseEntityExtractor(EntityExtractor):
     ) -> GraphNode:
         return GraphNode(
             id=person_info.id,
-            label=CoreNodeLabel.PERSON,
+            label=CoreNodeLabel.PERSON.value,
             project=project,
             properties={
                 "display_name": person_info.display_name,

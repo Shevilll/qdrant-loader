@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from typing import Any
 
 from .config import JiraExtraField, JiraFieldType
@@ -176,7 +177,6 @@ def parse_issue(
         raise ValueError(
             f"Missing reporter for Jira issue {issue_identifier}: {fields.get('reporter')!r}"
         )
-
     # Parent key (optional)
     parent = fields.get("parent")
     parent_key = parent.get("key") if isinstance(parent, dict) else None

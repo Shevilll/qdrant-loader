@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+from qdrant_loader.config import initialize_config
+from qdrant_loader_core.logging import LoggingConfig
+
 from .schema.init_schema import init_schema
 from .store import GraphEdge, GraphNode, GraphStore, SubGraph
 
@@ -30,6 +33,7 @@ __all__ = [
     "SubGraph",
 ]
 
+logger = LoggingConfig.get_logger(__name__)
 
 _graph_store: FalkorGraphStore | None = None
 _graph_store_lock = asyncio.Lock()
@@ -77,11 +81,11 @@ async def get_graph_store(
                                     None,
                                 )
 
-                    except Exception:
-                        # Settings may not be initialized yet (e.g. during tests or
-                        # early startup). Fall back to sensible defaults instead
-                        # of raising an error.
-                        pass
+                    except RuntimeError as e:
+                        logger.warning(
+                            "Settings not initialized, using default graph config: %s",
+                            e,
+                        )
 
                 _graph_store = _FalkorGraphStore(
                     host=final_host,

@@ -1,12 +1,15 @@
 """Cross-document intelligence operations handler for MCP server."""
 
 import asyncio
+from pathlib import Path
 import re
 import time
 import uuid
 from typing import Any
 
+from qdrant_loader.config import initialize_config
 from qdrant_loader_core.graph import get_graph_store
+from qdrant_loader_core.graph.models import CoreEdgeType
 
 from ..search.engine import SearchEngine
 from ..utils import LoggingConfig
@@ -957,10 +960,14 @@ class IntelligenceHandler:
         cypher: str,
         params: dict | None = None,
     ):
+        project_root = Path.cwd()
+        initialize_config(
+            yaml_path=project_root / "config.yaml",
+            env_path=project_root / ".env",
+            skip_validation=True,
+        )
         store = await get_graph_store()
         return await store.query_cypher(cypher, params or {})
-
-    _REL_TYPE_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 
     @staticmethod
     def _validate_depth(depth: int) -> int:
@@ -1003,66 +1010,121 @@ class IntelligenceHandler:
         depth = self._validate_depth(depth)
 
         query = f"""
-        MATCH (start:Document {id: "AIKH-1757"})
-            -[rels*1..1]-
-            (node)
-        WHERE ALL(r IN rels WHERE type(r) IN ["AUTHORED_BY", "HAS_LABEL"])
-
-        RETURN collect(DISTINCT node) AS nodesllect(DISTINCT node) AS nodes
+        MATCH path =
+            (start:Document {{id: $ticket_key}})
+            -[:LINKS_TO*1..{depth}]->
+            (target)
+        RETURN
+            nodes(path),
+            relationships(path)
         """
-
-
+        
         query_params = {
             "ticket_key": ticket_key,
+            "depth": depth,
         }
-
-        result = await self._run_graph_query(query, query_params)
+        try:
+            result = await self._run_graph_query(query, query_params)
+        except Exception:
+            logger.exception("Graph query failed")
+            raise
         return self.formatters.format_graph(result)
 
-    async def get_epic_tree(self, epic_key: str):
+    async def get_epic_tree(self, request_id: str | int | None, params: dict[str, Any]):
         """
         Get full epic hierarchy (stories + subtasks)
         """
 
-        query = """
-        MATCH path = (epic:Document {id: $id})
+        if "epic_key" not in params:
+            logger.error("Missing required parameter: epic_key")
+            return self.protocol.create_response(
+                request_id,
+                error={
+                    "code": -32602,
+                    "message": "Invalid params",
+                    "data": "Missing required parameter: epic_key",
+                },
+            )
+
+        epic_key = params.get("epic_key")
+
+        query = f"""
+        MATCH path = (epic:Document {{id: $epic_key}})
         <-[:PART_OF*]-(child:Document)
         RETURN nodes(path), relationships(path)
         """
-
-        result = await self._run_graph_query(query, {"id": f"jira:{epic_key}"})
-
+        query_params = {
+            "epic_key": epic_key,
+        }
+        result = await self._run_graph_query(query, query_params)
         return self.formatters.format_graph(result)
 
     async def find_related_documents(
         self,
-        document_id: str,
-        relationship_types: list[str] | None = None,
-        depth: int = 2,
+        request_id: str | int | None,
+        params: dict[str, Any],
     ):
         """
-        Generic multi-hop traversal
+        Generic multi-hop traversal.
         """
 
-        depth = self._validate_depth(depth)
+        if "document_id" not in params:
+            logger.error("Missing required parameter: document_id")
+            return self.protocol.create_response(
+                request_id,
+                error={
+                    "code": -32602,
+                    "message": "Invalid params",
+                    "data": "Missing required parameter: document_id",
+                },
+            )
+
+        document_id = params.get("document_id")
+        relationship_types = params.get("relationship_types")
+        depth = self._validate_depth(params.get("depth", 2))
+
         rel_clause = ""
+
         if relationship_types:
+            allowed_relationships = {
+                edge.value for edge in CoreEdgeType
+            }
+
             invalid = [
                 rel_type
                 for rel_type in relationship_types
-                if not self._REL_TYPE_RE.fullmatch(rel_type)
+                if rel_type not in allowed_relationships
             ]
+
             if invalid:
-                raise ValueError("Invalid relationship type")
+                return self.protocol.create_response(
+                    request_id,
+                    error={
+                        "code": -32602,
+                        "message": "Invalid params",
+                        "data": (
+                            f"Invalid relationship types: {invalid}. "
+                            f"Valid values are: {CoreEdgeType.list_values()}"
+                        ),
+                    },
+                )
+
             rel_clause = ":" + "|".join(relationship_types)
 
         query = f"""
-        MATCH path = (start:Document {{id: $id}})
-        -[{rel_clause}*1..{depth}]-(related:Document)
-        RETURN nodes(path), relationships(path)
+        MATCH path =
+            (start:Document {{id: $id}})
+            -[{rel_clause}*1..{depth}]-
+            (related)
+        RETURN
+            nodes(path),
+            relationships(path)
         """
 
-        result = await self._run_graph_query(query, {"id": document_id})
+        result = await self._run_graph_query(
+            query,
+            {"id": document_id},
+        )
 
         return self.formatters.format_graph(result)
 

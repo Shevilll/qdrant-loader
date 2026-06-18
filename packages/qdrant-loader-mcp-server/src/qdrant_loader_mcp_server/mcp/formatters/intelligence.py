@@ -406,24 +406,42 @@ class IntelligenceResultFormatters:
         return formatted
 
     @staticmethod
+    def _safe_attr(obj, attr, default=None):
+        return getattr(obj, attr, default)
+
+    @staticmethod
     def _get_property(obj, key):
-        properties = getattr(obj, "properties", None)
-        return properties.get(key) if properties else None
+        properties = IntelligenceResultFormatters._safe_attr(
+            obj, "properties", {}
+        )
+
+        if not isinstance(properties, dict):
+            try:
+                properties = dict(properties)
+            except Exception:
+                return None
+
+        return properties.get(key)
 
     @staticmethod
     def _get_label(node):
-        labels = getattr(node, "label", None)
-        if labels:
-            return labels[0]
-        return "Unknown"
+        labels = IntelligenceResultFormatters._safe_attr(
+            node,
+            "labels",
+            None,
+        )
+
+        if isinstance(labels, (list, tuple)):
+            return ", ".join(map(str, labels)) if labels else "Unknown"
+
+        return str(labels) if labels is not None else "Unknown"
 
     @staticmethod
     def format_graph(result):
         nodes = {}
         edges = []
         edge_keys = set()
-
-        internal_node_id_map: dict[int, str] = {}
+        internal_node_id_map = {}
 
         for row in result:
             if not row:
@@ -433,24 +451,31 @@ class IntelligenceResultFormatters:
             path_edges = row[1] if len(row) > 1 else []
 
             for n in path_nodes:
-                node_id = IntelligenceResultFormatters._get_property(n, "id")
+                node_id = IntelligenceResultFormatters._get_property(
+                    n, "id"
+                )
+                node_label = IntelligenceResultFormatters._get_label(n)
 
                 if node_id is None:
                     continue
 
-                if hasattr(n, "id") and isinstance(n.id, int):
-                    internal_node_id_map[n.id] = node_id
+                internal_id = getattr(n, "id", None)
+                if isinstance(internal_id, int):
+                    internal_node_id_map[internal_id] = node_id
 
                 if node_id not in nodes:
-                    properties = (
-                        dict(n.properties)
-                        if hasattr(n, "properties")
-                        else {}
+                    properties = IntelligenceResultFormatters._safe_attr(
+                        n, "properties", {}
                     )
+
+                    try:
+                        properties = dict(properties)
+                    except Exception:
+                        properties = {}
 
                     nodes[node_id] = {
                         "id": node_id,
-                        "label": IntelligenceResultFormatters._get_label(n),
+                        "label": node_label,
                         "project": properties.get("project"),
                         "properties": properties,
                     }
@@ -459,45 +484,52 @@ class IntelligenceResultFormatters:
                 source = None
                 target = None
 
-                if hasattr(r, "src_node"):
+                src_node = getattr(r, "src_node", None)
+                if src_node is not None:
                     source = (
-                        internal_node_id_map.get(r.src_node)
-                        if isinstance(r.src_node, int)
+                        internal_node_id_map.get(src_node)
+                        if isinstance(src_node, int)
                         else IntelligenceResultFormatters._get_property(
-                            r.src_node, "id"
+                            src_node, "id"
                         )
                     )
 
-                if hasattr(r, "dest_node"):
+                dest_node = getattr(r, "dest_node", None)
+                if dest_node is not None:
                     target = (
-                        internal_node_id_map.get(r.dest_node)
-                        if isinstance(r.dest_node, int)
+                        internal_node_id_map.get(dest_node)
+                        if isinstance(dest_node, int)
                         else IntelligenceResultFormatters._get_property(
-                            r.dest_node, "id"
+                            dest_node, "id"
                         )
                     )
 
                 if source is None or target is None:
                     continue
 
-                edge_type = getattr(
-                    r,
-                    "edge_type",
-                    getattr(r, "relation", "UNKNOWN"),
-                )
+                edge_type = getattr(r, "edge_type", None)
 
-                edge_key = (source, target, edge_type)
+                if callable(edge_type):
+                    edge_type = edge_type()
+
+                if edge_type is None:
+                    edge_type = getattr(r, "relation", "UNKNOWN")
+
+                edge_key = (source, target, str(edge_type))
 
                 if edge_key in edge_keys:
                     continue
 
                 edge_keys.add(edge_key)
 
-                properties = (
-                    dict(r.properties)
-                    if hasattr(r, "properties")
-                    else {}
+                properties = IntelligenceResultFormatters._safe_attr(
+                    r, "properties", {}
                 )
+
+                try:
+                    properties = dict(properties)
+                except Exception:
+                    properties = {}
 
                 edges.append(
                     {

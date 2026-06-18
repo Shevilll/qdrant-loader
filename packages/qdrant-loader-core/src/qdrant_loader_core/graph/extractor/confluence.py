@@ -47,7 +47,7 @@ class ConfluenceEntityExtractor(BaseEntityExtractor):
     ) -> GraphNode:
         return GraphNode(
             id=doc.id,
-            label=CoreNodeLabel.DOCUMENT,
+            label=CoreNodeLabel.DOCUMENT.value,
             project=project,
             properties={
                 "title": doc.title,
@@ -92,7 +92,7 @@ class ConfluenceEntityExtractor(BaseEntityExtractor):
 
         return GraphNode(
             id=f"space:{space_key}",
-            label=CoreNodeLabel.CONTAINER,
+            label=CoreNodeLabel.CONTAINER.value,
             project=space_key,
             properties={
                 "kind": "confluence_space",
@@ -115,7 +115,7 @@ class ConfluenceEntityExtractor(BaseEntityExtractor):
         return [
             GraphNode(
                 id=f"label:{label}",
-                label=CoreNodeLabel.LABEL,
+                label=CoreNodeLabel.LABEL.value,
                 project=project,
                 properties={
                     "name": label,
@@ -143,7 +143,7 @@ class ConfluenceEntityExtractor(BaseEntityExtractor):
                 GraphEdge(
                     source=doc.id,
                     target=str(parent_id),
-                    edge_type=CoreEdgeType.PART_OF,
+                    edge_type=CoreEdgeType.PART_OF.value,
                     project=project,
                     properties={
                         "kind": "page_child",
@@ -161,7 +161,7 @@ class ConfluenceEntityExtractor(BaseEntityExtractor):
                 GraphEdge(
                     source=doc.id,
                     target=str(child_id),
-                    edge_type=CoreEdgeType.HAS_CHILD,
+                    edge_type=CoreEdgeType.HAS_CHILD.value,
                     project=project,
                     properties={
                         "kind": "page_child",

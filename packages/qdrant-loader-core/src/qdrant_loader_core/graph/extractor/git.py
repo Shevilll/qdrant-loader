@@ -40,7 +40,7 @@ class GitEntityExtractor(BaseEntityExtractor):
     ) -> GraphNode:
         return GraphNode(
             id=doc.id,
-            label=CoreNodeLabel.DOCUMENT,
+            label=CoreNodeLabel.DOCUMENT.value,
             project=project,
             properties={
                 "title": doc.title,
@@ -78,7 +78,7 @@ class GitEntityExtractor(BaseEntityExtractor):
 
         return GraphNode(
             id=f"git:{repo_name}",
-            label=CoreNodeLabel.CONTAINER,
+            label=CoreNodeLabel.CONTAINER.value,
             project=repo_name,
             properties={
                 "kind": "repository",
